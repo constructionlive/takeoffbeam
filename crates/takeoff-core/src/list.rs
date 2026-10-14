@@ -1,0 +1,373 @@
+//! The Markups List: one row per item with Bluebeam-style columns, plus the
+//! per-item summary (counts, totals, cost) and CSV export of both.
+
+use std::collections::BTreeMap;
+
+use crate::doc::{Document, ItemRef};
+use crate::model::*;
+use crate::time::date_from_ms;
+use crate::units::{format_quantity, group_thousands};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RowKind {
+	Count,
+	Length,
+	Perimeter,
+	Area,
+	Angle,
+	Annotation(AnnotationKindKey),
+}
+
+/// `AnnotationKind` with an order, for sorting rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AnnotationKindKey(pub u8);
+
+impl RowKind {
+	pub fn label(self) -> &'static str {
+		match self {
+			RowKind::Count => "Count",
+			RowKind::Length => "Length",
+			RowKind::Perimeter => "Perimeter",
+			RowKind::Area => "Area",
+			RowKind::Angle => "Angle",
+			RowKind::Annotation(k) => AnnotationKind::ALL[k.0 as usize].label(),
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkupRow {
+	pub item: ItemRef,
+	pub kind: RowKind,
+	pub page: u32,
+	/// Category name, or the annotation's subject.
+	pub subject: String,
+	pub category_id: Option<String>,
+	pub color: String,
+	/// Badge number within the category (marks and measurements).
+	pub number: Option<u32>,
+	pub label: String,
+	pub value: Option<f64>,
+	pub unit: String,
+	pub quantity: String,
+	/// Areas: perimeter; with depth: volume.
+	pub extra: String,
+	pub author: String,
+	pub date: String,
+	pub modified_ms: i64,
+	/// Pending/Confirmed for AI marks, else the review status.
+	pub status: String,
+	pub layer: String,
+	pub note: String,
+	pub source: &'static str,
+	pub fields: BTreeMap<String, String>,
+	pub locked: bool,
+	pub hidden: bool,
+}
+
+const UNGROUPED_COLOR: &str = "#22D3EE";
+
+pub fn rows(doc: &Document) -> Vec<MarkupRow> {
+	let d = &doc.data;
+	let disp = &d.display;
+	let mark_seq = crate::numbering::mark_seq(&d.marks);
+	let meas_seq = crate::numbering::measurement_seq(&d.measurements);
+	let cat = |id: &Option<String>| id.as_deref().and_then(|i| d.category(i));
+	let mut out = Vec::with_capacity(d.marks.len() + d.measurements.len() + d.annotations.len());
+
+	for m in &d.marks {
+		let c = cat(&m.category_id);
+		out.push(MarkupRow {
+			item: ItemRef::Mark(m.id.clone()),
+			kind: RowKind::Count,
+			page: m.page,
+			subject: c.map(|c| c.name.clone()).unwrap_or_else(|| "Count".into()),
+			category_id: m.category_id.clone(),
+			color: c.map(|c| c.color.clone()).unwrap_or_else(|| UNGROUPED_COLOR.into()),
+			number: mark_seq.get(&m.id).copied(),
+			label: String::new(),
+			value: Some(1.0),
+			unit: "ea".into(),
+			quantity: "1 ea".into(),
+			extra: String::new(),
+			author: m.meta.author.clone().unwrap_or_else(|| if m.source == Source::Ai { "AI".into() } else { String::new() }),
+			date: m.meta.created_at.map(date_from_ms).unwrap_or_default(),
+			modified_ms: m.meta.modified_at.unwrap_or(0),
+			status: m.meta.review.clone().unwrap_or_else(|| match m.status {
+				MarkStatus::Pending => "Pending".into(),
+				MarkStatus::Confirmed => "Confirmed".into(),
+			}),
+			layer: m.meta.layer.clone().unwrap_or_default(),
+			note: m.note.clone().unwrap_or_default(),
+			source: if m.source == Source::Ai { "AI" } else { "User" },
+			fields: m.fields.clone().unwrap_or_default(),
+			locked: m.meta.locked,
+			hidden: c.is_some_and(|c| c.hidden),
+		});
+	}
+	for m in &d.measurements {
+		let c = cat(&m.category_id);
+		let q = doc.quantity(m);
+		let kind = match m.kind {
+			MeasurementType::Length if m.closed => RowKind::Perimeter,
+			MeasurementType::Length => RowKind::Length,
+			MeasurementType::Area => RowKind::Area,
+			MeasurementType::Angle => RowKind::Angle,
+		};
+		let extra = q
+			.as_ref()
+			.map(|q| {
+				let mut parts = vec![];
+				if let Some(p) = q.perimeter {
+					parts.push(format!("P {}", format_quantity(p, &q.base_unit, disp)));
+				}
+				if let Some(v) = q.volume {
+					parts.push(format!("V {}", format_quantity(v, &format!("{}³", q.base_unit), disp)));
+				}
+				parts.join(" · ")
+			})
+			.unwrap_or_default();
+		out.push(MarkupRow {
+			item: ItemRef::Measurement(m.id.clone()),
+			kind,
+			page: m.page,
+			subject: c.map(|c| c.name.clone()).unwrap_or_else(|| kind.label().into()),
+			category_id: m.category_id.clone(),
+			color: m.color.clone().or_else(|| c.map(|c| c.color.clone())).unwrap_or_else(|| UNGROUPED_COLOR.into()),
+			number: meas_seq.get(&m.id).copied(),
+			label: m.label.clone().unwrap_or_default(),
+			value: q.as_ref().map(|q| q.value),
+			unit: q.as_ref().map(|q| q.unit.clone()).unwrap_or_default(),
+			quantity: q.as_ref().map(|q| format_quantity(q.value, &q.unit, disp)).unwrap_or_else(|| "no scale".into()),
+			extra,
+			author: m.meta.author.clone().unwrap_or_else(|| if m.source == Some(Source::Ai) { "AI".into() } else { String::new() }),
+			date: m.meta.created_at.map(date_from_ms).unwrap_or_default(),
+			modified_ms: m.meta.modified_at.unwrap_or(0),
+			status: m.meta.review.clone().unwrap_or_default(),
+			layer: m.meta.layer.clone().unwrap_or_default(),
+			note: m.note.clone().unwrap_or_default(),
+			source: if m.source == Some(Source::Ai) { "AI" } else { "User" },
+			fields: m.fields.clone().unwrap_or_default(),
+			locked: m.meta.locked,
+			hidden: c.is_some_and(|c| c.hidden),
+		});
+	}
+	for a in &d.annotations {
+		let k = AnnotationKind::ALL.iter().position(|k| *k == a.kind).unwrap_or(0) as u8;
+		out.push(MarkupRow {
+			item: ItemRef::Annotation(a.id.clone()),
+			kind: RowKind::Annotation(AnnotationKindKey(k)),
+			page: a.page,
+			subject: a.subject.clone().unwrap_or_else(|| a.kind.label().into()),
+			category_id: None,
+			color: a.style.stroke.clone(),
+			number: None,
+			label: a.text.clone().unwrap_or_default(),
+			value: None,
+			unit: String::new(),
+			quantity: String::new(),
+			extra: String::new(),
+			author: a.meta.author.clone().unwrap_or_else(|| if a.source == Some(Source::Ai) { "AI".into() } else { String::new() }),
+			date: a.meta.created_at.map(date_from_ms).unwrap_or_default(),
+			modified_ms: a.meta.modified_at.unwrap_or(0),
+			status: a.meta.review.clone().unwrap_or_default(),
+			layer: a.meta.layer.clone().unwrap_or_default(),
+			note: a.note.clone().unwrap_or_default(),
+			source: if a.source == Some(Source::Ai) { "AI" } else { "User" },
+			fields: BTreeMap::new(),
+			locked: a.meta.locked,
+			hidden: false,
+		});
+	}
+	out
+}
+
+/// One line of the takeoff summary: everything in one item (category).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryLine {
+	pub category_id: Option<String>,
+	pub name: String,
+	pub color: String,
+	pub kind: CategoryKind,
+	pub items: usize,
+	pub pending: usize,
+	/// Count for count items, summed value for length/area.
+	pub total: f64,
+	pub unit: String,
+	pub total_text: String,
+	/// Areas: summed volume when depths are set.
+	pub volume: Option<f64>,
+	pub unit_cost: Option<f64>,
+	pub cost: Option<f64>,
+	/// Mixed units or unscaled pages → the total is partial.
+	pub warning: Option<String>,
+}
+
+pub fn summary(doc: &Document) -> Vec<SummaryLine> {
+	let d = &doc.data;
+	let disp = &d.display;
+	let mut out: Vec<SummaryLine> = Vec::new();
+	let mut keys: Vec<Option<&Category>> = d.categories.iter().map(Some).collect();
+	keys.push(None);
+	for c in keys {
+		let cid = c.map(|c| c.id.clone());
+		let marks: Vec<&Mark> = d.marks.iter().filter(|m| m.category_id == cid).collect();
+		let meas: Vec<&Measurement> =
+			d.measurements.iter().filter(|m| m.category_id == cid && m.kind != MeasurementType::Angle).collect();
+		if c.is_none() && marks.is_empty() && meas.is_empty() {
+			continue;
+		}
+		let kind = c.map(|c| c.kind()).unwrap_or(if marks.is_empty() { CategoryKind::Length } else { CategoryKind::Count });
+		let (mut total, mut unit, mut warning, mut volume) = (0.0, String::new(), None, None::<f64>);
+		if kind == CategoryKind::Count {
+			total = marks.len() as f64;
+			unit = "ea".into();
+		} else {
+			let mut unscaled = 0;
+			for m in &meas {
+				match doc.quantity(m) {
+					Some(q) => {
+						if unit.is_empty() {
+							unit = q.unit.clone();
+						}
+						if crate::geometry::unit_key(&q.unit) != crate::geometry::unit_key(&unit) {
+							warning = Some("mixed units".into());
+							continue;
+						}
+						total += q.value;
+						if let Some(v) = q.volume {
+							*volume.get_or_insert(0.0) += v;
+						}
+					}
+					None => unscaled += 1,
+				}
+			}
+			if unscaled > 0 {
+				warning = Some(format!("{unscaled} not scaled"));
+			}
+		}
+		let items = if kind == CategoryKind::Count { marks.len() } else { meas.len() };
+		let unit_cost = c.and_then(|c| c.unit_cost);
+		out.push(SummaryLine {
+			category_id: cid,
+			name: c.map(|c| c.name.clone()).unwrap_or_else(|| "Ungrouped".into()),
+			color: c.map(|c| c.color.clone()).unwrap_or_else(|| UNGROUPED_COLOR.into()),
+			kind,
+			items,
+			pending: marks.iter().filter(|m| m.status == MarkStatus::Pending).count(),
+			total,
+			total_text: if unit.is_empty() { "—".into() } else { group_thousands(&format_quantity(total, &unit, disp)) },
+			unit,
+			volume,
+			unit_cost,
+			cost: unit_cost.map(|u| u * total),
+			warning,
+		});
+	}
+	out
+}
+
+fn csv_cell(s: &str) -> String {
+	if s.contains([',', '"', '\n', '\r']) {
+		format!("\"{}\"", s.replace('"', "\"\""))
+	} else {
+		s.to_string()
+	}
+}
+
+fn csv_line(cells: &[String]) -> String {
+	cells.iter().map(|c| csv_cell(c)).collect::<Vec<_>>().join(",")
+}
+
+/// Markups List as CSV, custom columns included.
+pub fn rows_csv(doc: &Document, rows: &[MarkupRow]) -> String {
+	let custom = &doc.data.custom_fields;
+	let mut header: Vec<String> =
+		["Page", "Type", "Subject", "#", "Label", "Quantity", "Value", "Unit", "Extra", "Author", "Date", "Status", "Layer", "Source", "Note"]
+			.iter()
+			.map(|s| s.to_string())
+			.collect();
+	header.extend(custom.iter().map(|f| f.name.clone()));
+	let mut out = csv_line(&header);
+	for r in rows {
+		let mut cells = vec![
+			r.page.to_string(),
+			r.kind.label().to_string(),
+			r.subject.clone(),
+			r.number.map(|n| n.to_string()).unwrap_or_default(),
+			r.label.clone(),
+			r.quantity.clone(),
+			r.value.map(|v| format!("{v}")).unwrap_or_default(),
+			r.unit.clone(),
+			r.extra.clone(),
+			r.author.clone(),
+			r.date.clone(),
+			r.status.clone(),
+			r.layer.clone(),
+			r.source.to_string(),
+			r.note.clone(),
+		];
+		cells.extend(custom.iter().map(|f| r.fields.get(&f.id).cloned().unwrap_or_default()));
+		out.push('\n');
+		out.push_str(&csv_line(&cells));
+	}
+	out.push('\n');
+	out
+}
+
+pub fn summary_csv(lines: &[SummaryLine]) -> String {
+	let mut out = csv_line(&["Item", "Type", "Count", "Quantity", "Unit", "Volume", "Unit cost", "Cost", "Note"].map(String::from));
+	for l in lines {
+		out.push('\n');
+		out.push_str(&csv_line(&[
+			l.name.clone(),
+			format!("{:?}", l.kind),
+			l.items.to_string(),
+			format!("{}", l.total),
+			l.unit.clone(),
+			l.volume.map(|v| format!("{v}")).unwrap_or_default(),
+			l.unit_cost.map(|v| format!("{v:.2}")).unwrap_or_default(),
+			l.cost.map(|v| format!("{v:.2}")).unwrap_or_default(),
+			l.warning.clone().unwrap_or_default(),
+		]));
+	}
+	out.push('\n');
+	out
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn summary_and_csv() {
+		let mut data = TakeoffData::default();
+		let mut c = Category::new("c1", "Duplex, 20A", "#4CC2FF", CategoryKind::Count);
+		c.unit_cost = Some(12.5);
+		data.categories.push(c);
+		for i in 0..3 {
+			data.marks.push(Mark {
+				id: format!("m{i}"),
+				category_id: Some("c1".into()),
+				page: 1,
+				x: 0.1 * i as f64,
+				y: 0.1,
+				w: 0.01,
+				h: 0.01,
+				source: Source::Ai,
+				status: MarkStatus::Pending,
+				tile: None,
+				note: None,
+				fields: None,
+				meta: Default::default(),
+			});
+		}
+		let doc = Document::new(data, vec![(1000.0, 500.0)], "me");
+		let s = summary(&doc);
+		assert_eq!(s[0].items, 3);
+		assert_eq!(s[0].cost, Some(37.5));
+		let csv = rows_csv(&doc, &rows(&doc));
+		assert!(csv.contains("\"Duplex, 20A\""));
+		assert_eq!(csv.lines().count(), 4);
+	}
+}

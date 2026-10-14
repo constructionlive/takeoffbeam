@@ -2,6 +2,33 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Fresh id with a prefix (`m`, `ms`, `an`, `c`, `vp`), unique within a process run
+/// and across runs (time-based), like the platform's `newTakeoffId`.
+pub fn new_id(prefix: &str) -> String {
+	use std::sync::atomic::{AtomicU64, Ordering};
+	static COUNTER: AtomicU64 = AtomicU64::new(0);
+	let n = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+	format!("{prefix}_{}_{}", radix36(now_ms() as u64), radix36(n))
+}
+
+pub fn now_ms() -> i64 {
+	std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn radix36(mut n: u64) -> String {
+	const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+	if n == 0 {
+		return "0".into();
+	}
+	let mut out = Vec::new();
+	while n > 0 {
+		out.push(DIGITS[(n % 36) as usize]);
+		n /= 36;
+	}
+	out.reverse();
+	String::from_utf8(out).unwrap()
+}
+
 /// Sidecar format version. Keep in step with construction.live `takeoffTypes.ts`.
 pub const TAKEOFF_VERSION: u32 = 1;
 
@@ -98,9 +125,33 @@ pub struct Category {
 	/// Where the reference symbol sits (usually the legend).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub legend_region: Option<Region>,
+	/// Price per unit (each / ft / ft² …) for the cost column.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub unit_cost: Option<f64>,
+	/// Hidden in the viewer (Bluebeam "hide markups of this subject").
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub hidden: bool,
 }
 
 impl Category {
+	pub fn new(id: impl Into<String>, name: impl Into<String>, color: impl Into<String>, kind: CategoryKind) -> Self {
+		Self {
+			id: id.into(),
+			name: name.into(),
+			color: color.into(),
+			description: None,
+			kind: Some(kind),
+			icon: None,
+			line_style: None,
+			hatch: None,
+			chest_item_id: None,
+			opacity: None,
+			legend_crop: None,
+			legend_region: None,
+			unit_cost: None,
+			hidden: false,
+		}
+	}
 	pub fn kind(&self) -> CategoryKind {
 		self.kind.unwrap_or_default()
 	}
@@ -128,6 +179,29 @@ pub struct TileRef {
 	pub col: u32,
 }
 
+/// Who made an item and when, plus Bluebeam-style list metadata. Flattened
+/// into marks, measurements and annotations; every field is optional so
+/// platform files (which have none of these) load unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemMeta {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub author: Option<String>,
+	/// Unix milliseconds.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub created_at: Option<i64>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub modified_at: Option<i64>,
+	/// Markup layer (Bluebeam "Layer" column), not a PDF layer.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub layer: Option<String>,
+	/// Review status label ("Accepted", "Rejected", "Completed", …).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub review: Option<String>,
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub locked: bool,
+}
+
 /// A counted symbol: top-left + size as full-page fractions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,6 +226,8 @@ pub struct Mark {
 	pub note: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fields: Option<BTreeMap<String, String>>,
+	#[serde(flatten)]
+	pub meta: ItemMeta,
 }
 
 /// A user-defined markups-list column.
@@ -175,8 +251,12 @@ pub struct PageScale {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MeasurementType {
+	/// Polyline; `closed` makes it a perimeter.
 	Length,
+	/// Polygon (implicitly closed), optional cutouts and depth (→ volume).
 	Area,
+	/// Three points: arm end, vertex, arm end. Not scaled.
+	Angle,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +286,207 @@ pub struct Measurement {
 	pub unit: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub fields: Option<BTreeMap<String, String>>,
+	/// Length only: closing segment counted (perimeter).
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub closed: bool,
+	/// Area only: holes subtracted from the area (Bluebeam "cutout").
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub cutouts: Vec<Vec<Point>>,
+	/// Area only: depth in the scale's unit; turns the area into a volume.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub depth: Option<f64>,
+	#[serde(flatten)]
+	pub meta: ItemMeta,
+}
+
+impl Measurement {
+	pub fn new(id: impl Into<String>, page: u32, kind: MeasurementType, points: Vec<Point>) -> Self {
+		Self {
+			id: id.into(),
+			page,
+			kind,
+			category_id: None,
+			points,
+			source: None,
+			label: None,
+			note: None,
+			color: None,
+			value: None,
+			unit: None,
+			fields: None,
+			closed: false,
+			cutouts: vec![],
+			depth: None,
+			meta: ItemMeta::default(),
+		}
+	}
+}
+
+/// What an annotation markup draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationKind {
+	/// points: [top-left, bottom-right]
+	Text,
+	/// points: [box top-left, box bottom-right, leader tip]
+	Callout,
+	/// points: polygon vertices, drawn with scalloped edges
+	Cloud,
+	/// points: [corner, opposite corner]
+	Rectangle,
+	/// points: [corner, opposite corner] of the bounding box
+	Ellipse,
+	/// points: [start, end]
+	Line,
+	/// points: [tail, head]
+	Arrow,
+	Polyline,
+	Polygon,
+	/// points: [corner, opposite corner], drawn translucent, multiply-like
+	Highlight,
+	/// points: freehand stroke
+	Ink,
+	/// points: [top-left, bottom-right]; text = stamp label ("APPROVED")
+	Stamp,
+}
+
+impl AnnotationKind {
+	pub const ALL: [AnnotationKind; 12] = [
+		AnnotationKind::Text,
+		AnnotationKind::Callout,
+		AnnotationKind::Cloud,
+		AnnotationKind::Rectangle,
+		AnnotationKind::Ellipse,
+		AnnotationKind::Line,
+		AnnotationKind::Arrow,
+		AnnotationKind::Polyline,
+		AnnotationKind::Polygon,
+		AnnotationKind::Highlight,
+		AnnotationKind::Ink,
+		AnnotationKind::Stamp,
+	];
+	pub fn label(self) -> &'static str {
+		match self {
+			AnnotationKind::Text => "Text Box",
+			AnnotationKind::Callout => "Callout",
+			AnnotationKind::Cloud => "Cloud",
+			AnnotationKind::Rectangle => "Rectangle",
+			AnnotationKind::Ellipse => "Ellipse",
+			AnnotationKind::Line => "Line",
+			AnnotationKind::Arrow => "Arrow",
+			AnnotationKind::Polyline => "Polyline",
+			AnnotationKind::Polygon => "Polygon",
+			AnnotationKind::Highlight => "Highlight",
+			AnnotationKind::Ink => "Pen",
+			AnnotationKind::Stamp => "Stamp",
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationStyle {
+	pub stroke: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fill: Option<String>,
+	/// Stroke width in PDF points (scales with zoom like the drawing does).
+	pub width: f64,
+	pub opacity: f64,
+	/// Font size in PDF points.
+	#[serde(default = "default_font_size")]
+	pub font_size: f64,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub line_style: Option<LineStyle>,
+}
+
+fn default_font_size() -> f64 {
+	10.0
+}
+
+impl Default for AnnotationStyle {
+	fn default() -> Self {
+		Self { stroke: "#E8531A".into(), fill: None, width: 1.5, opacity: 1.0, font_size: 10.0, line_style: None }
+	}
+}
+
+/// A Bluebeam-style markup that is not a quantity: text, clouds, arrows, pen…
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotation {
+	pub id: String,
+	pub page: u32,
+	pub kind: AnnotationKind,
+	pub points: Vec<Point>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub text: Option<String>,
+	#[serde(default)]
+	pub style: AnnotationStyle,
+	/// Markups-list "Subject"; defaults to the kind label.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub subject: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub note: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub source: Option<Source>,
+	#[serde(flatten)]
+	pub meta: ItemMeta,
+}
+
+/// A region of a page with its own scale (Bluebeam "viewport"): details drawn
+/// at a different scale than the plan on the same sheet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Viewport {
+	pub id: String,
+	pub page: u32,
+	pub name: String,
+	pub x: f64,
+	pub y: f64,
+	pub w: f64,
+	pub h: f64,
+	pub scale: PageScale,
+}
+
+impl Viewport {
+	pub fn contains(&self, p: Point) -> bool {
+		p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h
+	}
+}
+
+/// How lengths are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LengthFormat {
+	/// 12.50 ft
+	#[default]
+	Decimal,
+	/// 12'-6 1/2" (imperial scales only; fractions to `fraction_denominator`)
+	FeetInches,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplaySettings {
+	#[serde(default)]
+	pub length_format: LengthFormat,
+	/// Decimal places.
+	#[serde(default = "default_precision")]
+	pub precision: u8,
+	/// 2, 4, 8, 16, 32 or 64.
+	#[serde(default = "default_denominator")]
+	pub fraction_denominator: u32,
+}
+
+fn default_precision() -> u8 {
+	2
+}
+fn default_denominator() -> u32 {
+	16
+}
+
+impl Default for DisplaySettings {
+	fn default() -> Self {
+		Self { length_format: LengthFormat::Decimal, precision: 2, fraction_denominator: 16 }
+	}
 }
 
 /// One PDF optional-content layer, with what it means for AI runs.
@@ -242,6 +523,13 @@ pub struct TakeoffData {
 	pub hidden_layers: Vec<String>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub layers: Vec<LayerInfo>,
+	// ── Takeoff Desk extensions (the platform ignores these) ──
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub annotations: Vec<Annotation>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub viewports: Vec<Viewport>,
+	#[serde(default)]
+	pub display: DisplaySettings,
 }
 
 impl Default for TakeoffData {
@@ -258,6 +546,9 @@ impl Default for TakeoffData {
 			measurements: vec![],
 			hidden_layers: vec![],
 			layers: vec![],
+			annotations: vec![],
+			viewports: vec![],
+			display: DisplaySettings::default(),
 		}
 	}
 }
@@ -268,5 +559,24 @@ impl TakeoffData {
 	}
 	pub fn scale_for(&self, page: u32) -> Option<&PageScale> {
 		self.page_scales.iter().find(|s| s.page == page)
+	}
+
+	/// The scale that applies at `at` on `page`: the innermost viewport that
+	/// contains the point, else the page calibration.
+	pub fn scale_at(&self, page: u32, at: Point) -> Option<&PageScale> {
+		self.viewports
+			.iter()
+			.filter(|v| v.page == page && v.contains(at))
+			.min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal))
+			.map(|v| &v.scale)
+			.or_else(|| self.scale_for(page))
+	}
+
+	pub fn category(&self, id: &str) -> Option<&Category> {
+		self.categories.iter().find(|c| c.id == id)
+	}
+
+	pub fn page_info(&self, page: u32) -> Option<&PageInfo> {
+		self.pages.iter().find(|p| p.page == page)
 	}
 }

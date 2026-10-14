@@ -109,6 +109,7 @@ mod tests {
 			tile: None,
 			note: None,
 			fields: None,
+			meta: Default::default(),
 		}
 	}
 

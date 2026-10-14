@@ -4,11 +4,21 @@
 //! pixels, never a model's 0–1000 grid, never local to a tile or a zoomed view.
 //! Pixels exist only at render time (page size at scale × zoom).
 //!
-//! The JSON shape (`TakeoffData`) is the same as construction.live's
-//! `takeoffTypes.ts`, so a sidecar file imports into the platform unchanged.
+//! The JSON shape (`TakeoffData`) is construction.live's `takeoffTypes.ts`
+//! plus optional extensions (annotations, viewports, item metadata, display
+//! settings), so a platform file loads here unchanged and a Takeoff Desk file
+//! imports into the platform (which keeps the parts it knows).
 
+pub mod coords;
+pub mod doc;
 pub mod geometry;
+pub mod list;
 pub mod model;
+pub mod normalize;
 pub mod numbering;
+pub mod sidecar;
+pub mod time;
+pub mod units;
 
+pub use doc::{Clipboard, Document, ItemRef};
 pub use model::*;
