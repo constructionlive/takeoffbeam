@@ -1,0 +1,14 @@
+[package]
+name = "takeoff-pdf"
+description = "PDF rendering, text and layers for Takeoff Desk (pdfium)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+takeoff-core.workspace = true
+pdfium-render.workspace = true
+image.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,5 @@
+/target
+/vendor
+.DS_Store
+*.png
+!docs/**/*.png

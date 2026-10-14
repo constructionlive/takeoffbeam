@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/construction-live/takeoff-desk"
+authors = ["construction.live <hello@construction.live>"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "image_latest", "thread_safe"] }
+sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+takeoff-core = { path = "crates/takeoff-core" }
+takeoff-pdf = { path = "crates/takeoff-pdf" }
+takeoff-models = { path = "crates/takeoff-models" }
