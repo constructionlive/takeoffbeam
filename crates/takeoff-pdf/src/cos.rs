@@ -760,7 +760,7 @@ mod tests {
 
 	#[test]
 	fn parses_nested_objects() {
-		let src = b"<< /Type /Catalog /Pages 3 0 R /Names [ (a\\(b\\)) <48 49> 1.5 -2 true null ] /N#20x /Sub << /K 1 >> >>";
+		let src = b"<< /Type /Catalog /Pages 3 0 R /Names [ (a\\(b\\)) <48 49> 1.5 -2 true null ] /N#20x /Sub /Inner << /K 1 >> >>";
 		let mut p = Parser { buf: src, pos: 0 };
 		let o = p.object().unwrap();
 		let d = o.as_dict().unwrap();
