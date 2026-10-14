@@ -1,0 +1,99 @@
+//! App preferences, persisted as JSON in the OS config dir.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use takeoff_core::Category;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThemeChoice {
+	#[default]
+	System,
+	Light,
+	Dark,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+	pub author: String,
+	pub theme: ThemeChoice,
+	/// Mouse wheel zooms (Bluebeam default) instead of scrolling.
+	pub wheel_zooms: bool,
+	pub recent: Vec<PathBuf>,
+	pub snap: bool,
+	pub show_badges: bool,
+	/// "local:<id>", "cloud:<id>" or "custom".
+	pub model: String,
+	pub custom_base_url: String,
+	pub custom_api_key: String,
+	pub custom_model: String,
+	pub cloud_url: String,
+	pub llama_server: String,
+	pub context_tokens: u32,
+	pub kv_q8: bool,
+	/// Saved takeoff items (Bluebeam Tool Chest), reusable across drawings.
+	pub tool_chest: Vec<Category>,
+	pub left_panel: bool,
+	pub right_panel: bool,
+	pub markups_list: bool,
+	pub onboarded: bool,
+}
+
+impl Default for Settings {
+	fn default() -> Self {
+		Self {
+			author: whoami(),
+			theme: ThemeChoice::System,
+			wheel_zooms: true,
+			recent: vec![],
+			snap: true,
+			show_badges: true,
+			model: String::new(),
+			custom_base_url: String::new(),
+			custom_api_key: String::new(),
+			custom_model: String::new(),
+			cloud_url: String::new(),
+			llama_server: String::new(),
+			context_tokens: 32_768,
+			kv_q8: true,
+			tool_chest: vec![],
+			left_panel: true,
+			right_panel: true,
+			markups_list: true,
+			onboarded: false,
+		}
+	}
+}
+
+fn whoami() -> String {
+	std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "Me".into())
+}
+
+pub fn config_dir() -> PathBuf {
+	let d = dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("Takeoff Desk");
+	let _ = std::fs::create_dir_all(&d);
+	d
+}
+
+impl Settings {
+	fn path() -> PathBuf {
+		config_dir().join("settings.json")
+	}
+	pub fn load() -> Self {
+		std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+	}
+	pub fn save(&self) {
+		if let Ok(json) = serde_json::to_vec_pretty(self) {
+			let tmp = Self::path().with_extension("json.tmp");
+			if std::fs::write(&tmp, json).is_ok() {
+				let _ = std::fs::rename(tmp, Self::path());
+			}
+		}
+	}
+	pub fn push_recent(&mut self, p: PathBuf) {
+		self.recent.retain(|x| x != &p);
+		self.recent.insert(0, p);
+		self.recent.truncate(12);
+	}
+}

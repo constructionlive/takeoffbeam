@@ -1,0 +1,33 @@
+[package]
+name = "takeoff-app"
+description = "Takeoff Desk: Bluebeam-style takeoff with a native AI agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "takeoff-desk"
+path = "src/main.rs"
+
+[dependencies]
+takeoff-core.workspace = true
+takeoff-pdf.workspace = true
+takeoff-models.workspace = true
+takeoff-agent.workspace = true
+takeoff-cloud.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+image.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+dirs.workspace = true
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "persistence"] }
+egui_extras = { version = "0.35", default-features = false }
+rfd = "0.15"
+earcutr = "0.4"
+open = "5"
+
+[dev-dependencies]
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }

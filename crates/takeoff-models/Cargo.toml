@@ -15,3 +15,9 @@ serde_json.workspace = true
 reqwest.workspace = true
 dirs.workspace = true
 parking_lot.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

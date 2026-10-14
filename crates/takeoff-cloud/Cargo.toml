@@ -13,3 +13,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 reqwest.workspace = true
 dirs.workspace = true
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }

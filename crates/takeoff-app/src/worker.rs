@@ -1,0 +1,216 @@
+//! The render worker: one thread owns the open `Drawing` (pdfium is not
+//! re-entrant), renders pages/regions/thumbnails, reads vectors, searches.
+//! The UI sends requests and drains results every frame; stale view renders
+//! are dropped so panning never queues up work.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use eframe::egui;
+use takeoff_core::snap::Segment;
+use takeoff_pdf::outline::Bookmark;
+use takeoff_pdf::search::Hit;
+use takeoff_pdf::{Drawing, FracRect};
+
+pub enum Req {
+	/// Base texture for a page (whole page, long edge `max_px`).
+	Base { page: u32, max_px: u32 },
+	/// Sharp render of a region at an exact pixel size.
+	View { page: u32, region: FracRect, px: (u32, u32), generation: u64 },
+	Thumb { page: u32, max_px: u32 },
+	Segments { page: u32 },
+	Search { query: String, match_case: bool, whole_word: bool, generation: u64, from: u32 },
+	SetHidden(HashSet<String>),
+	Reload,
+}
+
+pub struct Opened {
+	pub page_sizes: Vec<(f64, f64)>,
+	pub labels: Vec<Option<String>>,
+	pub layers: Vec<String>,
+	pub default_off: Vec<String>,
+	pub outline: Vec<Bookmark>,
+}
+
+pub enum Res {
+	Opened(Box<Opened>),
+	Base { page: u32, image: egui::ColorImage },
+	View { page: u32, region: FracRect, generation: u64, image: egui::ColorImage },
+	Thumb { page: u32, image: egui::ColorImage },
+	Segments { page: u32, segments: Vec<Segment> },
+	Search { generation: u64, hits: Vec<Hit>, done: bool },
+	LayersApplied,
+	Error(String),
+}
+
+pub struct Worker {
+	tx: Sender<Req>,
+	pub rx: Receiver<Res>,
+	view_gen: Arc<AtomicU64>,
+	search_gen: Arc<AtomicU64>,
+}
+
+fn to_color_image(img: image::RgbaImage) -> egui::ColorImage {
+	let size = [img.width() as usize, img.height() as usize];
+	egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw())
+}
+
+impl Worker {
+	pub fn spawn(path: PathBuf, hidden: HashSet<String>, ctx: egui::Context) -> Self {
+		let (tx, req_rx) = unbounded::<Req>();
+		let (res_tx, rx) = unbounded::<Res>();
+		let view_gen = Arc::new(AtomicU64::new(0));
+		let search_gen = Arc::new(AtomicU64::new(0));
+		let (vg, sg) = (view_gen.clone(), search_gen.clone());
+		std::thread::Builder::new()
+			.name("takeoff-render".into())
+			.spawn(move || run(path, hidden, req_rx, res_tx, vg, sg, ctx))
+			.expect("spawn render worker");
+		Self { tx, rx, view_gen, search_gen }
+	}
+
+	pub fn send(&self, r: Req) {
+		let _ = self.tx.send(r);
+	}
+
+	/// Request a sharp view render; supersedes any pending one.
+	pub fn view(&self, page: u32, region: FracRect, px: (u32, u32)) -> u64 {
+		let generation = self.view_gen.fetch_add(1, Ordering::SeqCst) + 1;
+		self.send(Req::View { page, region, px, generation });
+		generation
+	}
+
+	pub fn search(&self, query: String, match_case: bool, whole_word: bool) -> u64 {
+		let generation = self.search_gen.fetch_add(1, Ordering::SeqCst) + 1;
+		self.send(Req::Search { query, match_case, whole_word, generation, from: 1 });
+		generation
+	}
+}
+
+fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res>, view_gen: Arc<AtomicU64>, search_gen: Arc<AtomicU64>, ctx: egui::Context) {
+	let open = |hidden: &HashSet<String>| -> Result<Drawing, String> {
+		let mut d = Drawing::open(&path).map_err(|e| e.to_string())?;
+		d.set_hidden_layers(hidden).map_err(|e| e.to_string())?;
+		Ok(d)
+	};
+	let mut d = match open(&hidden) {
+		Ok(d) => d,
+		Err(e) => {
+			let _ = tx.send(Res::Error(format!("Could not open the PDF: {e}")));
+			ctx.request_repaint();
+			return;
+		}
+	};
+	let send = |r: Res| {
+		let _ = tx.send(r);
+		ctx.request_repaint();
+	};
+	let describe = |d: &Drawing| {
+		let n = d.page_count();
+		Opened {
+			page_sizes: (1..=n).map(|p| d.page_size_pt(p).map(|(w, h)| (w as f64, h as f64)).unwrap_or((612.0, 792.0))).collect(),
+			labels: (1..=n).map(|p| d.page_label(p).ok().flatten()).collect(),
+			layers: d.layer_names(),
+			default_off: d.default_off_layers(),
+			outline: d.outline(),
+		}
+	};
+	send(Res::Opened(Box::new(describe(&d))));
+
+	let mut queue: Vec<Req> = Vec::new();
+	loop {
+		if queue.is_empty() {
+			match rx.recv() {
+				Ok(r) => queue.push(r),
+				Err(_) => return,
+			}
+		}
+		queue.extend(rx.try_iter());
+		// Priority: layers > view > base > segments > search > thumbs.
+		let pick = queue
+			.iter()
+			.enumerate()
+			.min_by_key(|(_, r)| match r {
+				Req::SetHidden(_) | Req::Reload => 0,
+				Req::View { .. } => 1,
+				Req::Base { .. } => 2,
+				Req::Segments { .. } => 3,
+				Req::Search { .. } => 4,
+				Req::Thumb { .. } => 5,
+			})
+			.map(|(i, _)| i)
+			.unwrap();
+		let req = queue.remove(pick);
+		match req {
+			Req::SetHidden(h) => {
+				if let Err(e) = d.set_hidden_layers(&h) {
+					send(Res::Error(e.to_string()));
+				}
+				send(Res::LayersApplied);
+			}
+			Req::Reload => match open(d.hidden_layers()) {
+				Ok(nd) => {
+					d = nd;
+					send(Res::Opened(Box::new(describe(&d))));
+				}
+				Err(e) => send(Res::Error(e)),
+			},
+			Req::View { page, region, px, generation } => {
+				if generation != view_gen.load(Ordering::SeqCst) {
+					continue;
+				}
+				let Ok((w_pt, _)) = d.page_size_pt(page) else { continue };
+				// DPI that makes the region exactly px.0 wide.
+				let dpi = px.0 as f32 / (w_pt * region.w as f32) * 72.0;
+				match d.render(page, dpi, region, None) {
+					Ok(r) => send(Res::View { page, region: r.region, generation, image: to_color_image(r.image) }),
+					Err(e) => send(Res::Error(e.to_string())),
+				}
+			}
+			Req::Base { page, max_px } => {
+				if let Ok(r) = d.render(page, 300.0, FracRect::FULL, Some(max_px)) {
+					send(Res::Base { page, image: to_color_image(r.image) });
+				}
+			}
+			Req::Thumb { page, max_px } => {
+				if let Ok(r) = d.render(page, 30.0, FracRect::FULL, Some(max_px)) {
+					send(Res::Thumb { page, image: to_color_image(r.image) });
+				}
+			}
+			Req::Segments { page } => {
+				let segments = d.segments(page).unwrap_or_default();
+				send(Res::Segments { page, segments });
+			}
+			Req::Search { query, match_case, whole_word, generation, from } => {
+				let n = d.page_count();
+				let mut batch = Vec::new();
+				if from > n {
+					send(Res::Search { generation, hits: vec![], done: true });
+				}
+				for p in from..=n {
+					if generation != search_gen.load(Ordering::SeqCst) {
+						break;
+					}
+					batch.extend(d.search_page(p, &query, match_case, whole_word, 200).unwrap_or_default());
+					if batch.len() >= 40 || p == n {
+						send(Res::Search { generation, hits: std::mem::take(&mut batch), done: p == n });
+					}
+					if !rx.is_empty() {
+						// Let views/thumbs through between pages; resume the search after.
+						queue.extend(rx.try_iter());
+						if queue.iter().any(|r| matches!(r, Req::View { .. } | Req::Base { .. } | Req::SetHidden(_))) {
+							if !batch.is_empty() {
+								send(Res::Search { generation, hits: std::mem::take(&mut batch), done: false });
+							}
+							queue.push(Req::Search { query: query.clone(), match_case, whole_word, generation, from: p + 1 });
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+}

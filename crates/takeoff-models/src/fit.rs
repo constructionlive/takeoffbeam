@@ -151,6 +151,26 @@ impl ModelShape {
 		}
 	}
 
+	/// A shape without a header (catalog models before download): all of
+	/// `kv_bytes_per_token` (at F16) is treated as full attention.
+	pub fn rough(name: &str, weights_bytes: u64, projector_bytes: u64, kv_bytes_per_token_f16: u64, train_ctx: u64) -> Self {
+		Self {
+			name: name.to_string(),
+			arch: "unknown".into(),
+			weights_bytes,
+			projector_bytes,
+			train_ctx,
+			n_vocab: 262_144,
+			n_embd: 4096,
+			full_attn_kv_elems: kv_bytes_per_token_f16 / 2,
+			swa_kv_elems: 0,
+			swa_window: 0,
+			recurrent_bytes: 0,
+			attention_layers: 0,
+			recurrent_layers: 0,
+		}
+	}
+
 	pub fn kv_bytes(&self, n_ctx: u64, cache: CacheType) -> u64 {
 		let per_tok = self.full_attn_kv_elems as f64 * n_ctx as f64
 			+ self.swa_kv_elems as f64 * n_ctx.min(self.swa_window.max(1)) as f64;
