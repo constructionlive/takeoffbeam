@@ -22,6 +22,13 @@ memmap2 = "0.9"
 flate2 = "1"
 resvg = { version = "0.48", default-features = false, features = ["text"] }
 ab_glyph = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+crossbeam-channel = "0.5"
+base64 = "0.22"
+dirs = "6"
+parking_lot = "0.12"
+takeoff-agent = { path = "crates/takeoff-agent" }
+takeoff-cloud = { path = "crates/takeoff-cloud" }
 takeoff-core = { path = "crates/takeoff-core" }
 takeoff-pdf = { path = "crates/takeoff-pdf" }
 takeoff-models = { path = "crates/takeoff-models" }
