@@ -1,5 +1,7 @@
 # Roadmap
 
+**Status 2026-10-14:** slices 0–8 built. See *Done* at the bottom; open items are under *Next*.
+
 Decided 2026-10-14:
 - Fully native UI (egui).
 - Apache-2.0 with a NOTICE that requires credit.
@@ -89,3 +91,39 @@ Decided 2026-10-14:
    - Publish the crates to crates.io and `cargo install takeoff-cli`.
    - mdBook docs and the MCP server.
 9. **Later.** Snap to vector lines, revision compare, send to construction.live, Linux.
+
+## Done (2026-10-14)
+
+- **Core:**
+  - Model with annotations, viewports, cutouts, volume, angle and item metadata.
+  - Presets and ft-in formatting; vision dialects including Qwen3.
+  - Undo/redo document store; markups list, summary and CSV; sidecar.
+  - Parity fixtures against the platform TypeScript; page remap; snap engine.
+- **PDF:**
+  - Layers through an incremental `/OCProperties` update (own lazy COS reader).
+  - Page tools plus takeoff-aware ops.
+  - Bookmarks, search, positioned text, vectors.
+  - Burn-in, flattened export, revision compare.
+- **App (egui):**
+  - Every measure and markup tool, with snapping and ortho.
+  - Selection, move, reshape, resize, copy/paste, lock, right-click menu.
+  - Takeoff, Properties and AI tabs; Pages, Bookmarks, Layers and Search tabs; Markups List.
+  - Tabs, start screen, dialogs, shortcuts, light and dark themes.
+  - Headless snapshot and simulated-input tests.
+- **Models:** catalog, downloads with resume, store and import, llama-server supervisor, fit
+  check from `--list-devices`.
+- **Cloud:** device-code sign-in (live endpoint verified), keychain, models, chat base URL.
+- **Agent:** see `crates/takeoff-agent`. Typed tools, streaming loop, image injection, vision
+  pipelines, a live run on local Qwen3.8 27B.
+- **CLI + MCP server.**
+- **macOS packaging:** a 46 MB dmg with pdfium, llama-server and the CLI; ad-hoc or Developer ID
+  signing; optional notarization.
+
+## Next
+
+- **Windows and Linux installers.** CI already builds and tests on Linux.
+- **Continuous-scroll page view and two-page spreads.**
+- **Auto area:** click inside a closed region.
+- **Spaces, markup legends, sets/slip-sheets.**
+- **"Send to construction.live":** upload the takeoff into a project register.
+- **Opening PDFs from Finder** (Apple Events) as well as drag-drop and the Open dialog.

@@ -1,8 +1,8 @@
 //! The application window: document tabs, toolbar, panels, status bar,
 //! dialogs, keyboard shortcuts and the start screen.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+
+use std::path::PathBuf;
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, Stroke, Vec2};
@@ -148,6 +148,7 @@ impl TakeoffApp {
 		for d in &mut self.docs {
 			d.poll(&ctx);
 			d.autosave(&ctx);
+			d.update_compare(&ctx);
 		}
 		let active = self.active;
 		let doc = self.docs.get_mut(active);
@@ -424,6 +425,16 @@ impl TakeoffApp {
 			if ui.button(format!("{}  Merge PDFs…", i::COMBINE)).clicked() {
 				act = Some(PageAction::Merge);
 			}
+			ui.separator();
+			if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Compare revisions…", i::GIT_COMPARE_ARROWS))).on_hover_text("Overlay another revision: red = only here, blue = only there").clicked() {
+				ui.close();
+				if let Some(other) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_title("Choose the other revision").pick_file() {
+					if let Some(d) = self.docs.get_mut(self.active) {
+						let pg = d.page;
+						d.start_compare(other, pg, &ctx);
+					}
+				}
+			}
 			if let Some(a) = act {
 				ui.close();
 				self.page_action(a, &ctx);
@@ -534,6 +545,32 @@ impl TakeoffApp {
 			if let Some(d) = self.docs.get_mut(active) {
 				let (snap, wheel) = (self.settings.snap, self.settings.wheel_zooms);
 				self.canvas.ui(ui, d, p, snap, wheel);
+				// Revision-compare bar.
+				let mut close_compare = false;
+				if let Some(c) = &mut d.compare {
+					let rect = ui.max_rect();
+					egui::Area::new(egui::Id::new("compare-bar")).fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 52.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+						egui::Frame::popup(&ui.ctx().global_style()).inner_margin(egui::Margin::symmetric(12, 8)).corner_radius(6).show(ui, |ui| {
+							ui.horizontal(|ui| {
+								ui.label(RichText::new(i::GIT_COMPARE_ARROWS).font(theme::icon_font(14.0)).color(p.accent));
+								let name = c.other.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+								ui.label(RichText::new(format!("Comparing with {name} p{}", c.other_page)).font(theme::semibold(12.5)));
+								ui.label(RichText::new("■ only here").color(Color32::from_rgb(230, 40, 40)).size(12.0));
+								ui.label(RichText::new("■ only there").color(Color32::from_rgb(40, 90, 230)).size(12.0));
+								if c.tex.is_some() {
+									ui.label(RichText::new(format!("{:.1}% changed", c.changed * 100.0)).size(12.0).color(p.text2));
+								}
+								ui.checkbox(&mut c.show_overlay, "Overlay");
+								if ui.button(format!("{} Close", i::X)).clicked() {
+									close_compare = true;
+								}
+							});
+						});
+					});
+				}
+				if close_compare {
+					d.compare = None;
+				}
 				// Tool hint bubble at the top of the canvas.
 				if self.canvas.tool != Tool::Select && self.canvas.tool != Tool::Pan {
 					let rect = ui.max_rect();
@@ -1232,13 +1269,8 @@ impl TakeoffApp {
 				let Some(dst) = rfd::FileDialog::new().set_file_name(&name).add_filter("PDF", &["pdf"]).save_file() else { return };
 				let src = d.path.clone();
 				let data = d.doc.lock().data.clone();
-				match takeoff_pdf::tools::extract_pages(&src, &pages, &dst) {
+				match takeoff_pdf::ops::extract(&src, &data, &pages, &dst) {
 					Ok(()) => {
-						// The extracted file gets its pages' takeoff too.
-						let mut t = data;
-						let map = takeoff_core::pages::reorder_map(&pages);
-						takeoff_core::pages::remap_pages(&mut t, map);
-						let _ = takeoff_core::sidecar::save(&dst, &t);
 						self.toast(format!("Extracted {} page(s) to {}", pages.len(), dst.file_name().unwrap_or_default().to_string_lossy()), false);
 					}
 					Err(e) => self.toast(e.to_string(), true),
@@ -1253,54 +1285,38 @@ impl TakeoffApp {
 		}
 		let Some(d) = self.docs.get_mut(self.active) else { return };
 		let path = d.path.clone();
-		if let Err(e) = backup_once(&path) {
+		if let Err(e) = takeoff_pdf::ops::backup_once(&path) {
 			self.toast(format!("Couldn't back up the PDF: {e}"), true);
 			return;
 		}
 		let n = d.page_count();
-		let result: Result<String, String> = (|| {
-			match &action {
-				PageAction::Rotate { pages, quarter_turns } => {
-					takeoff_pdf::tools::rotate_pages(&path, pages, *quarter_turns, &path).map_err(|e| e.to_string())?;
-					d.doc.lock().edit("Rotate pages", |t| {
-						for pg in pages {
-							takeoff_core::pages::rotate_page_items(t, *pg, *quarter_turns);
-						}
-					});
-					Ok(format!("Rotated {} page(s)", pages.len()))
-				}
-				PageAction::Delete { pages } => {
-					takeoff_pdf::tools::delete_pages(&path, pages, &path).map_err(|e| e.to_string())?;
-					let set: HashSet<u32> = pages.iter().copied().collect();
-					d.doc.lock().edit("Delete pages", |t| takeoff_core::pages::remap_pages(t, takeoff_core::pages::delete_map(n, &set)));
-					Ok(format!("Deleted {} page(s)", pages.len()))
-				}
-				PageAction::InsertBlank { at } => {
-					let size = d.page_size(d.page);
-					takeoff_pdf::tools::insert_blank(&path, *at, 1, (size.0 as f32, size.1 as f32), &path).map_err(|e| e.to_string())?;
-					d.doc.lock().edit("Insert page", |t| takeoff_core::pages::remap_pages(t, takeoff_core::pages::insert_map(*at, 1)));
-					Ok("Inserted a blank page".into())
-				}
-				PageAction::InsertFile { at } => {
-					let Some(other) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_file() else { return Err(String::new()) };
-					let added = takeoff_pdf::tools::insert_from(&path, *at, &other, &path).map_err(|e| e.to_string())?;
-					let theirs = takeoff_core::sidecar::load(&other).unwrap_or_default();
-					d.doc.lock().edit("Insert pages", |t| {
-						takeoff_core::pages::remap_pages(t, takeoff_core::pages::insert_map(*at, added));
-						takeoff_core::pages::append_takeoff(t, &theirs, at - 1);
-					});
-					Ok(format!("Inserted {added} page(s)"))
-				}
-				PageAction::Move { from, to } => {
-					let mut order: Vec<u32> = (1..=n).filter(|p| p != from).collect();
-					order.insert((*to as usize - 1).min(order.len()), *from);
-					takeoff_pdf::tools::reorder_pages(&path, &order, &path).map_err(|e| e.to_string())?;
-					d.doc.lock().edit("Move page", |t| takeoff_core::pages::remap_pages(t, takeoff_core::pages::reorder_map(&order)));
-					Ok(format!("Moved page {from} to {to}"))
-				}
-				_ => Err(String::new()),
+		let picked_file;
+		let order: Vec<u32>;
+		let edit = match &action {
+			PageAction::Rotate { pages, quarter_turns } => takeoff_pdf::ops::Edit::Rotate(pages, *quarter_turns),
+			PageAction::Delete { pages } => takeoff_pdf::ops::Edit::Delete(pages),
+			PageAction::InsertBlank { at } => {
+				let size = d.page_size(d.page);
+				takeoff_pdf::ops::Edit::InsertBlank { at: *at, size_pt: (size.0 as f32, size.1 as f32) }
 			}
-		})();
+			PageAction::InsertFile { at } => {
+				let Some(other) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_file() else { return };
+				picked_file = other;
+				takeoff_pdf::ops::Edit::InsertFile { at: *at, other: &picked_file }
+			}
+			PageAction::Move { from, to } => {
+				let mut o: Vec<u32> = (1..=n).filter(|p| p != from).collect();
+				o.insert((*to as usize - 1).min(o.len()), *from);
+				order = o;
+				takeoff_pdf::ops::Edit::Reorder(&order)
+			}
+			_ => return,
+		};
+		let mut data = d.doc.lock().data.clone();
+		let result = takeoff_pdf::ops::edit_in_place(&path, &mut data, edit).map_err(|e| e.to_string());
+		if result.is_ok() {
+			d.doc.lock().edit("Page edit", |t| *t = data);
+		}
 		match result {
 			Ok(msg) => {
 				d.save_now();
@@ -1333,29 +1349,16 @@ impl TakeoffApp {
 			_ => SplitMode::Bookmarks,
 		};
 		let Some(dir) = rfd::FileDialog::new().set_title("Folder for the split files").pick_folder() else { return Err(String::new()) };
-		let written = takeoff_pdf::tools::split(&d.path, &mode, &dir).map_err(|e| e.to_string())?;
-		// Each part gets the takeoff for its pages.
 		let data = d.doc.lock().data.clone();
-		for (file, a, b) in &written {
-			let mut t = data.clone();
-			let (a, b) = (*a, *b);
-			takeoff_core::pages::remap_pages(&mut t, move |p| (p >= a && p <= b).then(|| p - a + 1));
-			let _ = takeoff_core::sidecar::save(file, &t);
-		}
+		let written = takeoff_pdf::ops::split(&d.path, &data, &mode, &dir).map_err(|e| e.to_string())?;
 		let _ = open::that(&dir);
 		Ok(written.len())
 	}
 
 	fn run_merge(&mut self, files: &[PathBuf]) -> Result<Option<PathBuf>, String> {
 		let Some(dst) = rfd::FileDialog::new().set_file_name("Merged.pdf").add_filter("PDF", &["pdf"]).save_file() else { return Ok(None) };
-		let starts = takeoff_pdf::tools::merge(files, &dst).map_err(|e| e.to_string())?;
-		let mut merged = TakeoffData::default();
-		for (f, start) in files.iter().zip(&starts) {
-			// Prefer the open document's live takeoff.
-			let t = self.docs.iter().find(|d| &d.path == f).map(|d| d.doc.lock().data.clone()).or_else(|| takeoff_core::sidecar::load(f).ok()).unwrap_or_default();
-			takeoff_core::pages::append_takeoff(&mut merged, &t, start - 1);
-		}
-		takeoff_core::sidecar::save(&dst, &merged).map_err(|e| e.to_string())?;
+		let docs = &self.docs;
+		takeoff_pdf::ops::merge(files, &dst, |f| docs.iter().find(|d| d.path == f).map(|d| d.doc.lock().data.clone())).map_err(|e| e.to_string())?;
 		Ok(Some(dst))
 	}
 
@@ -1467,15 +1470,6 @@ fn group_label(ui: &mut egui::Ui, p: &Palette, s: &str) {
 
 fn units_list() -> [&'static str; 5] {
 	takeoff_core::MEASURE_UNITS
-}
-
-fn backup_once(path: &Path) -> std::io::Result<()> {
-	let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-	let backup = path.with_file_name(format!("{stem} (original).pdf"));
-	if !backup.exists() {
-		std::fs::copy(path, backup)?;
-	}
-	Ok(())
 }
 
 /// "22'-6\"", "22' 6 1/2\"", "12.5", "3.2 m", "150mm", "6\"" → (value, unit).

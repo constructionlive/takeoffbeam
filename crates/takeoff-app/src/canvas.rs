@@ -243,6 +243,19 @@ impl Canvas {
 				painter.image(s.tex.id(), r, uv, Color32::WHITE);
 			}
 		}
+		if let Some(c) = &doc.compare {
+			if c.page == doc.page && c.show_overlay {
+				match &c.tex {
+					Some(t) => {
+						painter.image(t.id(), pr, uv, Color32::WHITE);
+					}
+					None => {
+						painter.rect_filled(pr, 0.0, Color32::from_white_alpha(200));
+						painter.text(pr.center(), Align2::CENTER_CENTER, "Comparing revisions…", theme::medium(13.0), Color32::from_gray(90));
+					}
+				}
+			}
+		}
 		if !doc.base.contains_key(&doc.page) {
 			painter.text(pr.center(), Align2::CENTER_CENTER, "Rendering…", theme::medium(13.0), Color32::from_gray(140));
 		}

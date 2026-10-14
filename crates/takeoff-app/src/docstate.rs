@@ -24,6 +24,16 @@ pub struct SharpView {
 	pub zoom: f32,
 }
 
+pub struct CompareState {
+	pub other: PathBuf,
+	pub other_page: u32,
+	pub page: u32,
+	pub tex: Option<TextureHandle>,
+	/// Share of pixels that differ (0–1).
+	pub changed: f32,
+	pub show_overlay: bool,
+}
+
 pub struct SearchState {
 	pub query: String,
 	pub match_case: bool,
@@ -66,6 +76,7 @@ pub struct OpenDoc {
 
 	pub selection: HashSet<String>,
 	pub search: Option<SearchState>,
+	pub compare: Option<CompareState>,
 	last_saved_rev: u64,
 	last_change: Option<(u64, Instant)>,
 	pub save_error: Option<String>,
@@ -108,6 +119,7 @@ impl OpenDoc {
 			snap_requested: None,
 			selection: HashSet::new(),
 			search: None,
+			compare: None,
 			last_saved_rev: 0,
 			last_change: None,
 			save_error: None,
@@ -203,6 +215,14 @@ impl OpenDoc {
 					self.sharp_key = None;
 					self.thumbs.clear();
 					self.thumbs_requested.clear();
+				}
+				Res::Compare { page, image, changed } => {
+					if let Some(c) = &mut self.compare {
+						if c.page == page {
+							c.tex = Some(ctx.load_texture("compare", image, TextureOptions::LINEAR));
+							c.changed = changed;
+						}
+					}
 				}
 				Res::Error(e) => self.error = Some(e),
 			}
@@ -382,6 +402,24 @@ impl OpenDoc {
 			px = ((px.0 as f32 * cap) as u32, (px.1 as f32 * cap) as u32);
 		}
 		self.worker.view(page, region, (px.0.max(1), px.1.max(1)));
+	}
+
+	/// Start (or retarget) a revision compare against another PDF page.
+	pub fn start_compare(&mut self, other: PathBuf, other_page: u32, ctx: &egui::Context) {
+		let max_px = 3000.min(ctx.input(|i| i.max_texture_side) as u32);
+		self.worker.send(Req::Compare { page: self.page, other: other.clone(), other_page, max_px });
+		self.compare = Some(CompareState { other, other_page, page: self.page, tex: None, changed: 0.0, show_overlay: true });
+	}
+
+	/// Keep the compare in step with page changes (same page number in both files).
+	pub fn update_compare(&mut self, ctx: &egui::Context) {
+		let needs = self.compare.as_ref().is_some_and(|c| c.page != self.page);
+		if needs {
+			let c = self.compare.take().unwrap();
+			let delta = self.page as i64 - c.page as i64;
+			let other_page = (c.other_page as i64 + delta).max(1) as u32;
+			self.start_compare(c.other, other_page, ctx);
+		}
 	}
 
 	pub fn set_hidden_layers(&mut self, hidden: HashSet<String>) {

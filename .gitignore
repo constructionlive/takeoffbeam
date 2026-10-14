@@ -2,4 +2,5 @@
 /vendor
 .DS_Store
 *.png
+!assets/**/*.png
 !docs/**/*.png

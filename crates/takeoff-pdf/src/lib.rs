@@ -9,6 +9,7 @@ pub mod burn;
 pub mod cos;
 pub mod export;
 pub mod layers;
+pub mod ops;
 pub mod outline;
 pub mod search;
 pub mod tools;

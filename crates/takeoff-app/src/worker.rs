@@ -25,6 +25,8 @@ pub enum Req {
 	Search { query: String, match_case: bool, whole_word: bool, generation: u64, from: u32 },
 	SetHidden(HashSet<String>),
 	Reload,
+	/// Overlay this page with a page of another PDF (revision compare).
+	Compare { page: u32, other: PathBuf, other_page: u32, max_px: u32 },
 }
 
 pub struct Opened {
@@ -43,6 +45,7 @@ pub enum Res {
 	Segments { page: u32, segments: Vec<Segment> },
 	Search { generation: u64, hits: Vec<Hit>, done: bool },
 	LayersApplied,
+	Compare { page: u32, image: egui::ColorImage, changed: f32 },
 	Error(String),
 }
 
@@ -134,7 +137,7 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 			.iter()
 			.enumerate()
 			.min_by_key(|(_, r)| match r {
-				Req::SetHidden(_) | Req::Reload => 0,
+				Req::SetHidden(_) | Req::Reload | Req::Compare { .. } => 0,
 				Req::View { .. } => 1,
 				Req::Base { .. } => 2,
 				Req::Segments { .. } => 3,
@@ -170,6 +173,10 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 					Err(e) => send(Res::Error(e.to_string())),
 				}
 			}
+			Req::Compare { page, other, other_page, max_px } => match compare(&d, page, &other, other_page, max_px) {
+				Ok((image, changed)) => send(Res::Compare { page, image, changed }),
+				Err(e) => send(Res::Error(e)),
+			},
 			Req::Base { page, max_px } => {
 				if let Ok(r) = d.render(page, 300.0, FracRect::FULL, Some(max_px)) {
 					send(Res::Base { page, image: to_color_image(r.image) });
@@ -213,4 +220,34 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 			}
 		}
 	}
+}
+
+/// Revision overlay: this page in red, the other in blue, shared ink black.
+/// Both are rendered to the same pixel size so the sheets line up when they
+/// share a paper size (the normal case for revisions).
+fn compare(d: &Drawing, page: u32, other: &std::path::Path, other_page: u32, max_px: u32) -> Result<(egui::ColorImage, f32), String> {
+	let a = d.render(page, 300.0, FracRect::FULL, Some(max_px)).map_err(|e| e.to_string())?;
+	let o = Drawing::open(other).map_err(|e| format!("Could not open the other drawing: {e}"))?;
+	let (ow, _) = o.page_size_pt(other_page).map_err(|e| e.to_string())?;
+	let dpi = a.image.width() as f32 / ow * 72.0;
+	let b = o.render(other_page, dpi, FracRect::FULL, None).map_err(|e| e.to_string())?;
+	let b = if b.image.dimensions() == a.image.dimensions() {
+		b.image
+	} else {
+		image::imageops::resize(&b.image, a.image.width(), a.image.height(), image::imageops::FilterType::Triangle)
+	};
+	let (w, h) = a.image.dimensions();
+	let mut out = Vec::with_capacity((w * h * 4) as usize);
+	let mut changed = 0u64;
+	let lum = |p: &image::Rgba<u8>| (p[0] as u32 * 3 + p[1] as u32 * 6 + p[2] as u32) / 10;
+	for (pa, pb) in a.image.pixels().zip(b.pixels()) {
+		let (la, lb) = (lum(pa).min(255) as u8, lum(pb).min(255) as u8);
+		if la.abs_diff(lb) > 60 {
+			changed += 1;
+		}
+		// Only-this = red, only-other = blue, both = dark, neither = white.
+		out.extend_from_slice(&[lb, la.min(lb), la, 255]);
+	}
+	let frac = changed as f32 / (w as f32 * h as f32);
+	Ok((egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &out), frac))
 }
