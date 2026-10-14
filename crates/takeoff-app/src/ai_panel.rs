@@ -1,7 +1,8 @@
-//! The AI tab: pick a model (local llama.cpp, construction.live cloud, or any
-//! OpenAI-compatible endpoint), chat with the drawing agent, watch its steps.
+//! The AI tab: pick a model (local llama.cpp, construction.live cloud, the
+//! estimator's own Claude Code / Codex subscription, or any OpenAI-compatible
+//! endpoint), chat with the drawing agent, watch its steps.
 //! Also the Models window: installed models with a memory-fit verdict,
-//! downloads, sign-in, custom endpoint.
+//! downloads, sign-in, subscriptions, custom endpoint.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, ScrollArea, TextureHandle};
 use parking_lot::Mutex;
+use takeoff_agent::channel::{self, Channel, ChannelModel, ChannelStatus, ToolHost};
 use takeoff_agent::{AgentContext, AgentEvent, ChatSession, ProviderConfig, Role, TurnHandle};
 use takeoff_models::catalog;
 use takeoff_models::download::{DownloadHandle, DownloadState};
@@ -39,6 +41,33 @@ struct Live {
 	steps: Vec<Step>,
 	error: Option<String>,
 	started: Option<Instant>,
+	/// Transcript entries that existed when the turn began (the rest is drawn live).
+	transcript_len: usize,
+	/// The message being answered.
+	asked: String,
+}
+
+/// What we know about one subscription CLI (filled in by background threads).
+#[derive(Default)]
+struct ChannelInfo {
+	status: Option<ChannelStatus>,
+	models: Option<Result<Vec<ChannelModel>, String>>,
+	loading: bool,
+	/// Model id → None while testing, then the result.
+	tests: HashMap<String, Option<Result<String, String>>>,
+	custom_model: String,
+}
+
+/// "claude:opus" → (Claude Code, "opus").
+fn channel_model(model: &str) -> Option<(Channel, &str)> {
+	let (k, m) = model.split_once(':')?;
+	Some((Channel::from_key(k)?, m))
+}
+
+/// Where the CLIs run: an empty folder of ours, the same every time (Claude
+/// Code files its sessions by folder).
+fn channel_workdir() -> PathBuf {
+	config_dir().join("bench")
 }
 
 enum CloudFlow {
@@ -71,6 +100,9 @@ pub struct AiPanel {
 	probe: Option<Result<Vec<String>, String>>,
 	thumbs: HashMap<String, TextureHandle>,
 	usage: (u64, u64),
+	/// Drawing tools served to Claude Code / Codex, one per open document.
+	hosts: HashMap<PathBuf, ToolHost>,
+	channels: HashMap<Channel, Arc<Mutex<ChannelInfo>>>,
 }
 
 impl AiPanel {
@@ -99,6 +131,8 @@ impl AiPanel {
 			probe: None,
 			thumbs: HashMap::new(),
 			usage: (0, 0),
+			hosts: HashMap::new(),
+			channels: Channel::ALL.into_iter().map(|c| (c, Arc::default())).collect(),
 		};
 		s.refresh_cloud_async();
 		s
@@ -147,6 +181,43 @@ impl AiPanel {
 		}
 	}
 
+	/// Put the open chat in history (if it has anything) and start an empty one.
+	fn new_conversation(&mut self, path: &PathBuf) {
+		let session = self.session(path);
+		let old = std::mem::take(&mut *session.lock());
+		archive_chat(path, &old);
+		self.save_session(path);
+		self.live = Live::default();
+	}
+
+	fn history_menu(&mut self, ui: &mut egui::Ui, path: &PathBuf, p: &Palette) {
+		ui.set_min_width(320.0);
+		let past = past_chats(path);
+		if past.is_empty() {
+			widgets::hint(ui, p, "No earlier conversations on this drawing yet. Start a new one with + and this one is kept here.");
+			return;
+		}
+		widgets::section_label(ui, p, "Earlier conversations on this drawing");
+		ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+			for c in past.iter().take(50) {
+				let label = format!("{}\n{} · {} message{}", short(&c.title, 60), ago(c.saved_ms), c.messages, if c.messages == 1 { "" } else { "s" });
+				let enabled = self.turn.is_none();
+				if ui.add_enabled(enabled, egui::Button::new(RichText::new(label).size(12.0)).frame(false).wrap()).clicked() {
+					if let Some(chat) = std::fs::read(&c.file).ok().and_then(|b| serde_json::from_slice::<ChatSession>(&b).ok()) {
+						let session = self.session(path);
+						let current = std::mem::replace(&mut *session.lock(), chat);
+						archive_chat(path, &current);
+						let _ = std::fs::remove_file(&c.file);
+						self.save_session(path);
+						self.live = Live::default();
+					}
+					ui.close();
+				}
+				ui.separator();
+			}
+		});
+	}
+
 	#[doc(hidden)]
 	pub fn debug_session(&mut self, path: &PathBuf) -> Arc<Mutex<ChatSession>> {
 		self.session(path)
@@ -179,6 +250,13 @@ impl AiPanel {
 			let label = self.cloud_models.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_else(|| id.to_string());
 			let ok = self.cloud.is_some();
 			(label, if ok { Color32::from_rgb(0x4C, 0xC2, 0xFF) } else { Color32::from_gray(140) }, if ok { "cloud" } else { "signed out" })
+		} else if let Some((ch, model)) = channel_model(m) {
+			let label = format!("{} · {}", ch.name(), if model.is_empty() { "default" } else { model });
+			let color = match ch {
+				Channel::ClaudeCode => Color32::from_rgb(0xD9, 0x77, 0x57),
+				Channel::Codex => Color32::from_rgb(0x22, 0xD3, 0xEE),
+			};
+			(label, color, "subscription")
 		} else if m == "custom" {
 			(settings.custom_model.clone(), Color32::from_rgb(0xA7, 0x8B, 0xFA), "custom")
 		} else {
@@ -284,6 +362,14 @@ impl AiPanel {
 			return;
 		}
 		takeoff_agent::set_local_thinking(settings.local_thinking);
+		if let Some((ch, model)) = channel_model(&settings.model) {
+			let model = model.to_string();
+			match self.start_channel_turn(ch, model, text, doc, settings) {
+				Ok(()) => {}
+				Err(e) => self.live = Live { error: Some(e), ..Default::default() },
+			}
+			return;
+		}
 		match self.provider(settings) {
 			Ok(provider) => {
 				let session = self.session(&doc.path);
@@ -295,7 +381,8 @@ impl AiPanel {
 					selected_ids: doc.selection.iter().cloned().collect(),
 					provider,
 				};
-				self.live = Live { started: Some(Instant::now()), ..Default::default() };
+				let transcript_len = session.lock().transcript().len();
+				self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), ..Default::default() };
 				self.turn = Some(takeoff_agent::start_turn(session, ctx, text));
 				self.turn_doc = Some(doc.path.clone());
 				self.queued = None;
@@ -306,6 +393,48 @@ impl AiPanel {
 				self.queued = None;
 			}
 		}
+	}
+
+	/// A turn on the estimator's Claude Code / Codex: the CLI runs the
+	/// conversation, the app serves it the drawing tools.
+	fn start_channel_turn(&mut self, ch: Channel, model: String, text: String, doc: &OpenDoc, settings: &Settings) -> Result<(), String> {
+		let exe = channel::find_exe(ch).ok_or_else(|| format!("{} isn't installed on this computer. See Models → Subscriptions.", ch.name()))?;
+		if !self.hosts.get(&doc.path).is_some_and(|h| h.serves(&doc.doc)) {
+			let host = ToolHost::start(doc.doc.clone(), doc.path.clone())?;
+			self.hosts.insert(doc.path.clone(), host);
+		}
+		let sweeps = self.sweep_provider(settings);
+		let session = self.session(&doc.path);
+		let turn = channel::ChannelTurn {
+			channel: ch,
+			exe,
+			model,
+			workdir: channel_workdir(),
+			sweeps,
+			current_page: doc.page,
+			visible_region: visible_region(doc),
+			selected_ids: doc.selection.iter().cloned().collect(),
+		};
+		let transcript_len = session.lock().transcript().len();
+		self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), ..Default::default() };
+		self.turn = Some(channel::start_turn(&self.hosts[&doc.path], session, turn, text));
+		self.turn_doc = Some(doc.path.clone());
+		self.queued = None;
+		Ok(())
+	}
+
+	/// The model detect / calibrate / trace call for their tiles when the
+	/// chat itself runs on a subscription: the construction.live default when
+	/// signed in, else a local vision model that is already loaded.
+	fn sweep_provider(&self, settings: &Settings) -> Option<ProviderConfig> {
+		if let Some((token, _)) = &self.cloud {
+			let default = self.cloud_me.as_ref().and_then(|m| m.default_model.clone());
+			let m = self.cloud_models.iter().find(|c| Some(&c.id) == default.as_ref()).or_else(|| self.cloud_models.first())?;
+			return Some(ProviderConfig { base_url: takeoff_cloud::chat_base_url(&Self::cloud_cfg(settings)), api_key: Some(token.clone()), model: m.id.clone(), context_tokens: m.context_tokens, vision: true });
+		}
+		let s = self.server.as_ref().filter(|_| self.server_state == ServerState::Ready)?;
+		let vision = self.installed.iter().any(|m| m.id == s.model_id() && m.vision);
+		vision.then(|| ProviderConfig { base_url: s.base_url(), api_key: None, model: s.model_id(), context_tokens: settings.context_tokens, vision: true })
 	}
 
 	/// Drain agent events; returns true while a turn is running.
@@ -414,24 +543,38 @@ impl AiPanel {
 	// ── Panel ───────────────────────────────────────────────────────────
 
 	pub fn ui(&mut self, ui: &mut egui::Ui, doc: Option<&mut OpenDoc>, canvas: &mut Canvas, settings: &mut Settings, p: &Palette) {
-		// Model picker row.
+		// Model picker: a full-width pill (provider badge · model · status · chevron).
 		let (label, dot, state) = self.model_label(settings);
+		let (badge, glyph) = provider_badge(&settings.model);
 		ui.horizontal(|ui| {
-			let r = ui.add(egui::Button::new(RichText::new(format!("{}  {label}  {}", i::CPU, i::CHEVRON_DOWN)).size(12.5)).fill(p.card).corner_radius(4));
-			let c = r.rect.right_center() + egui::vec2(8.0, 0.0);
-			ui.painter().circle_filled(c, 4.0, dot);
-			ui.add_space(14.0);
-			ui.label(RichText::new(state).size(11.5).color(p.text2));
-			if r.clicked() {
-				self.models_open = true;
+			let w = (ui.available_width() - 72.0).max(180.0);
+			let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::click());
+			let a11y = format!("Model: {label}");
+			r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &a11y));
+			let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
+			let painter = ui.painter();
+			painter.rect(rect, 6.0, if r.hovered() || open { p.hover } else { p.card }, egui::Stroke::new(1.0, if open { p.accent } else { p.border }), egui::StrokeKind::Inside);
+			let b = egui::Rect::from_min_size(rect.left_center() + egui::vec2(8.0, -13.0), egui::vec2(26.0, 26.0));
+			painter.rect_filled(b, 6.0, badge);
+			painter.text(b.center(), egui::Align2::CENTER_CENTER, glyph, theme::icon_font(14.0), Color32::WHITE);
+			let tx = b.right() + 10.0;
+			let max_w = rect.right() - 28.0 - tx;
+			let g = painter.layout(label.clone(), theme::semibold(13.0), p.text, max_w);
+			painter.galley(egui::pos2(tx, rect.top() + 5.0), g, p.text);
+			painter.circle_filled(egui::pos2(tx + 4.0, rect.bottom() - 11.0), 3.5, dot);
+			painter.text(egui::pos2(tx + 12.0, rect.bottom() - 11.0), egui::Align2::LEFT_CENTER, if state.is_empty() { "pick one to start" } else { state }, egui::FontId::proportional(11.5), p.text2);
+			painter.text(rect.right_center() - egui::vec2(14.0, 0.0), egui::Align2::CENTER_CENTER, if open { i::CHEVRON_UP } else { i::CHEVRON_DOWN }, theme::icon_font(14.0), p.text2);
+			if r.hovered() {
+				ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
 			}
+			egui::Popup::menu(&r).width(w.max(360.0)).show(|ui| self.model_menu(ui, settings, p));
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 				if let Some(d) = &doc {
-					if widgets::icon_button(ui, p, i::HISTORY, "New conversation", false).clicked() && self.turn.is_none() {
-						let path = d.path.clone();
-						self.session(&path).lock().clear();
-						self.save_session(&path);
-						self.live = Live::default();
+					let path = d.path.clone();
+					let r = widgets::icon_button(ui, p, i::HISTORY, "Past conversations", false);
+					egui::Popup::menu(&r).show(|ui| self.history_menu(ui, &path, p));
+					if widgets::icon_button(ui, p, i::PLUS, "New conversation (this one stays in history)", false).clicked() && self.turn.is_none() {
+						self.new_conversation(&path);
 					}
 				}
 			});
@@ -491,7 +634,8 @@ impl AiPanel {
 					});
 				run.clear();
 			};
-			for e in &transcript {
+			let upto = if self.turn.is_some() { self.live.transcript_len.min(transcript.len()) } else { transcript.len() };
+			for e in &transcript[..upto] {
 				match e.role {
 					Role::Tool => tool_run.push(e),
 					Role::User => {
@@ -515,23 +659,39 @@ impl AiPanel {
 				});
 			}
 			if self.turn.is_some() {
-				for s in &self.live.steps {
-					ui.horizontal_wrapped(|ui| {
-						match s.ok {
-							None => {
-								ui.spinner();
+				if !self.live.asked.is_empty() {
+					user_bubble(ui, p, &self.live.asked);
+				}
+				// Finished steps fold away like they do once the turn is over; the
+				// running one shows as a single line.
+				let done: Vec<&Step> = self.live.steps.iter().filter(|s| s.ok.is_some()).collect();
+				if !done.is_empty() {
+					let n = done.len();
+					let failed = done.iter().filter(|s| s.ok == Some(false)).count();
+					egui::CollapsingHeader::new(RichText::new(format!("{}  {n} step{}{}", i::WAND_SPARKLES, if n == 1 { "" } else { "s" }, if failed > 0 { format!(" · {failed} failed") } else { String::new() })).size(12.0).color(p.text2))
+						.id_salt("live-steps")
+						.default_open(false)
+						.show(ui, |ui| {
+							for s in &done {
+								ui.horizontal_wrapped(|ui| {
+									let ok = s.ok == Some(true);
+									ui.label(RichText::new(if ok { i::CHECK } else { i::CIRCLE_ALERT }).font(theme::icon_font(12.0)).color(if ok { p.success } else { p.danger }));
+									ui.label(RichText::new(tool_title(&s.name)).font(theme::semibold(12.0)));
+									ui.label(RichText::new(short(&s.summary, 140)).size(11.5).color(p.text2));
+								});
+								if let Some(t) = &s.thumb {
+									let size = t.size_vec2();
+									let w = size.x.min(ui.available_width());
+									ui.image((t.id(), egui::vec2(w, size.y * w / size.x)));
+								}
 							}
-							Some(ok) => {
-								ui.label(RichText::new(if ok { i::CHECK } else { i::CIRCLE_ALERT }).font(theme::icon_font(12.0)).color(if ok { p.success } else { p.danger }));
-							}
-						}
-						ui.label(RichText::new(tool_title(&s.name)).font(theme::semibold(12.0)));
-						ui.label(RichText::new(short(&s.summary, 140)).size(11.5).color(p.text2));
+						});
+				}
+				for s in self.live.steps.iter().filter(|s| s.ok.is_none()) {
+					ui.horizontal(|ui| {
+						ui.spinner();
+						ui.label(RichText::new(format!("{}…", tool_title(&s.name))).size(12.0).color(p.text2));
 					});
-					if let Some(t) = &s.thumb {
-						let size = t.size_vec2();
-						ui.image((t.id(), size));
-					}
 				}
 				if !self.live.text.trim().is_empty() {
 					markdown(ui, p, self.live.text.trim());
@@ -603,6 +763,113 @@ impl AiPanel {
 		let _ = canvas;
 	}
 
+	/// The model picker's dropdown: every model you can switch to right now,
+	/// grouped by where it runs, plus the Models window for setting more up.
+	fn model_menu(&mut self, ui: &mut egui::Ui, settings: &mut Settings, p: &Palette) {
+		ui.set_min_width(360.0);
+		ui.spacing_mut().item_spacing.y = 2.0;
+		if self.channels.values().any(|i| {
+			let i = i.lock();
+			i.status.is_none() && !i.loading
+		}) {
+			self.refresh_channels(ui.ctx());
+		}
+		let mut chosen: Option<String> = None;
+		let mut setup: Option<usize> = None;
+		let vision: Vec<_> = self.installed.iter().filter(|m| m.vision).cloned().collect();
+		let cache = Self::cache(settings);
+
+		group_header(ui, p, i::HARD_DRIVE, "On this computer", "private · free");
+		if vision.is_empty() {
+			if action_row(ui, p, i::DOWNLOAD, "Get a local model", "Runs offline; your drawings never leave this machine").clicked() {
+				setup = Some(1);
+			}
+		}
+		for m in vision {
+			let id = format!("local:{}", m.id);
+			let fit = self.fits.entry(m.id.clone()).or_insert_with(|| takeoff_models::fit_for(&m, settings.context_tokens, cache)).clone();
+			let sub = format!("{:.1} GB · {}", m.size_bytes as f64 / (1u64 << 30) as f64, match fit.verdict {
+				Verdict::Fits => "fits in memory",
+				Verdict::Tight => "tight on memory",
+				Verdict::TooBig => "not enough memory",
+			});
+			if model_row(ui, p, (Color32::from_rgb(0x10, 0xB9, 0x81), i::CPU), &m.label, &sub, settings.model == id, fit.verdict != Verdict::TooBig).clicked() {
+				chosen = Some(id);
+			}
+		}
+
+		ui.add_space(4.0);
+		group_header(ui, p, i::CLOUD, "construction.live", "uses your credits");
+		if self.cloud.is_some() && !self.cloud_models.is_empty() {
+			for m in self.cloud_models.clone() {
+				let id = format!("cloud:{}", m.id);
+				if model_row(ui, p, (p.accent_fill, i::CLOUD), &m.name, &format!("{}K context · sees drawings", m.context_tokens / 1000), settings.model == id, true).clicked() {
+					chosen = Some(id);
+				}
+			}
+		} else if action_row(ui, p, i::LOG_IN, "Sign in to construction.live", "Gemini, Claude, GPT and more on your account").clicked() {
+			setup = Some(2);
+		}
+
+		for ch in Channel::ALL {
+			ui.add_space(4.0);
+			let (color, glyph, plan) = match ch {
+				Channel::ClaudeCode => (Color32::from_rgb(0xD9, 0x77, 0x57), i::SPARKLES, "your Claude plan"),
+				Channel::Codex => (Color32::from_rgb(0x10, 0xA3, 0x7F), i::BOT, "your ChatGPT plan"),
+			};
+			group_header(ui, p, i::KEY_ROUND, ch.name(), plan);
+			let info = self.channels[&ch].clone();
+			let inf = info.lock();
+			match (&inf.status, &inf.models) {
+				(None, _) | (Some(_), None) if inf.loading => {
+					ui.horizontal(|ui| {
+						ui.add_space(10.0);
+						ui.spinner();
+						widgets::hint(ui, p, "Checking…");
+					});
+				}
+				(Some(st), Some(Ok(models))) if st.exe.is_some() && st.signed_in != Some(false) => {
+					let account = st.account.clone().unwrap_or_default();
+					for m in models {
+						let id = format!("{}:{}", ch.key(), m.id);
+						let sub = if m.note.is_empty() { account.clone() } else if account.is_empty() { m.note.clone() } else { format!("{} · {account}", m.note) };
+						if model_row(ui, p, (color, glyph), &m.label, &sub, settings.model == id, true).clicked() {
+							chosen = Some(id);
+						}
+					}
+				}
+				(Some(st), _) => {
+					let (title, sub) = if st.exe.is_none() {
+						(format!("Install {}", ch.name()), format!("Then use {plan} here"))
+					} else if st.signed_in == Some(false) {
+						(format!("Sign in to {}", ch.name()), "Takes a minute — we'll show you how".to_string())
+					} else {
+						("Couldn't list models".to_string(), "See details".to_string())
+					};
+					if action_row(ui, p, glyph, &title, &sub).clicked() {
+						setup = Some(3);
+					}
+				}
+				_ => {}
+			}
+		}
+		ui.add_space(6.0);
+		ui.separator();
+		if action_row(ui, p, i::SETTINGS, "Manage models…", "Downloads, memory check, sign-in, custom endpoints").clicked() {
+			setup = Some(self.models_tab);
+		}
+		if let Some(id) = chosen {
+			settings.model = id;
+			settings.save();
+			ui.close();
+		}
+		if let Some(tab) = setup {
+			self.models_open = true;
+			self.models_tab = tab;
+			ui.close();
+		}
+	}
+
 	fn welcome(&mut self, ui: &mut egui::Ui, doc: &OpenDoc, settings: &Settings, p: &Palette) {
 		ui.add_space(10.0);
 		ui.label(RichText::new(format!("{}  Drawing Bench", i::SPARKLES)).font(theme::semibold(15.0)).color(p.text));
@@ -626,7 +893,7 @@ impl AiPanel {
 			ui.add_space(8.0);
 			widgets::card(ui, p, |ui| {
 				ui.label(RichText::new("Pick a model to start").font(theme::semibold(13.0)));
-				widgets::hint(ui, p, "Run one on this computer (private, free), or sign in to construction.live for cloud models.");
+				widgets::hint(ui, p, "Run one on this computer (private, free), sign in to construction.live for cloud models, or use your own Claude or ChatGPT subscription.");
 				if widgets::primary_button(ui, p, "Choose a model…").clicked() {
 					self.models_open = true;
 				}
@@ -649,7 +916,7 @@ impl AiPanel {
 			.pivot(egui::Align2::CENTER_CENTER)
 			.default_pos(ctx.content_rect().center())
 			.show(ctx, |ui| {
-				widgets::tabs(ui, p, &[(i::HARD_DRIVE, "On this computer"), (i::CLOUD_DOWNLOAD, "Download"), (i::CLOUD, "construction.live"), (i::SERVER, "Custom endpoint")], &mut self.models_tab);
+				widgets::tabs(ui, p, &[(i::HARD_DRIVE, "On this computer"), (i::CLOUD_DOWNLOAD, "Download"), (i::CLOUD, "construction.live"), (i::KEY_ROUND, "Subscriptions"), (i::SERVER, "Custom endpoint")], &mut self.models_tab);
 				ui.separator();
 				ui.horizontal(|ui| {
 					ui.label(RichText::new("Context").color(p.text2));
@@ -677,6 +944,7 @@ impl AiPanel {
 					0 => self.installed_tab(ui, settings, p),
 					1 => self.download_tab(ui, settings, p),
 					2 => self.cloud_tab(ui, settings, p),
+					3 => self.subscriptions_tab(ui, settings, p),
 					_ => self.custom_tab(ui, settings, p),
 				});
 			});
@@ -923,6 +1191,166 @@ impl AiPanel {
 		});
 	}
 
+	/// Look up both CLIs again (install, sign-in, models) in the background.
+	fn refresh_channels(&self, ctx: &egui::Context) {
+		for (&ch, info) in &self.channels {
+			if info.lock().loading {
+				continue;
+			}
+			info.lock().loading = true;
+			let (info, ctx) = (info.clone(), ctx.clone());
+			std::thread::spawn(move || {
+				let st = channel::status(ch);
+				let models = st.exe.as_ref().filter(|_| st.signed_in != Some(false)).map(|exe| channel::models(ch, exe));
+				let mut i = info.lock();
+				i.status = Some(st);
+				i.models = models;
+				i.loading = false;
+				ctx.request_repaint();
+			});
+		}
+	}
+
+	fn subscriptions_tab(&mut self, ui: &mut egui::Ui, settings: &mut Settings, p: &Palette) {
+		if self.channels.values().any(|i| { let i = i.lock(); i.status.is_none() && !i.loading }) {
+			self.refresh_channels(ui.ctx());
+		}
+		ui.horizontal(|ui| {
+			widgets::hint(ui, p, "Use the Claude or ChatGPT plan you already pay for. Takeoff Desk runs Claude Code or Codex on this computer and hands it the drawing tools; usage counts against your plan's limits, not construction.live credits.");
+		});
+		ui.horizontal(|ui| {
+			if ui.button(format!("{}  Check again", i::REFRESH_CW)).clicked() {
+				self.refresh_channels(ui.ctx());
+			}
+		});
+		ui.add_space(4.0);
+		for ch in Channel::ALL {
+			let info = self.channels[&ch].clone();
+			widgets::card(ui, p, |ui| {
+				let mut i = info.lock();
+				ui.horizontal(|ui| {
+					ui.label(RichText::new(ch.name()).font(theme::semibold(13.5)));
+					ui.label(RichText::new(ch.plan()).size(11.5).color(p.text2));
+				});
+				let st = i.status.clone();
+				match &st {
+					None => {
+						ui.horizontal(|ui| {
+							ui.spinner();
+							widgets::hint(ui, p, &format!("Looking for {}…", ch.name()));
+						});
+						return;
+					}
+					Some(st) if st.exe.is_none() => {
+						ui.label(RichText::new(format!("{} Not installed", i::CIRCLE_ALERT)).color(p.text2));
+						widgets::hint(ui, p, "Install it in a terminal, then sign in once and press Check again:");
+						for cmd in [ch.install_command(), ch.login_command()] {
+							ui.horizontal(|ui| {
+								ui.label(RichText::new(cmd).monospace().size(12.0));
+								if ui.small_button(i::COPY).on_hover_text("Copy").clicked() {
+									ui.ctx().copy_text(cmd.to_string());
+								}
+							});
+						}
+						return;
+					}
+					Some(st) => {
+						let version = st.version.clone().unwrap_or_default();
+						match st.signed_in {
+							Some(false) => {
+								ui.label(RichText::new(format!("{} Installed {version} · not signed in", i::CIRCLE_ALERT)).color(p.warning));
+								ui.horizontal(|ui| {
+									widgets::hint(ui, p, "Sign in once in a terminal:");
+									ui.label(RichText::new(ch.login_command()).monospace().size(12.0));
+									if ui.small_button(i::COPY).on_hover_text("Copy").clicked() {
+										ui.ctx().copy_text(ch.login_command().to_string());
+									}
+								});
+								return;
+							}
+							_ => {
+								let who = st.account.clone().map(|a| format!(" · {a}")).unwrap_or_default();
+								ui.label(RichText::new(format!("{} Ready {version}{who}", i::CIRCLE_CHECK)).color(p.success));
+							}
+						}
+						if let Some(e) = &st.error {
+							ui.label(RichText::new(e).size(11.5).color(p.danger));
+						}
+					}
+				}
+				let exe = st.and_then(|s| s.exe).expect("installed");
+				ui.add_space(4.0);
+				let models = match &i.models {
+					Some(Ok(m)) => m.clone(),
+					Some(Err(e)) => {
+						ui.label(RichText::new(format!("Couldn't list models: {e}")).size(11.5).color(p.danger));
+						vec![]
+					}
+					None => {
+						ui.horizontal(|ui| {
+							ui.spinner();
+							widgets::hint(ui, p, "Loading models…");
+						});
+						vec![]
+					}
+				};
+				let mut rows: Vec<ChannelModel> = models;
+				let current = channel_model(&settings.model).filter(|(c, _)| *c == ch).map(|(_, m)| m.to_string());
+				if let Some(cur) = current.as_ref().filter(|c| !rows.iter().any(|r| &r.id == *c)) {
+					rows.push(ChannelModel { id: cur.clone(), label: cur.clone(), note: "Typed in".into() });
+				}
+				for m in rows {
+					ui.horizontal(|ui| {
+						ui.label(RichText::new(&m.label).font(theme::medium(13.0)));
+						ui.label(RichText::new(&m.note).size(11.5).color(p.text2));
+						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+							let key = format!("{}:{}", ch.key(), m.id);
+							if settings.model == key {
+								ui.label(RichText::new(format!("{} In use", i::CIRCLE_CHECK)).color(p.success));
+							} else if ui.button("Use").clicked() {
+								settings.model = key;
+								settings.save();
+							}
+							match i.tests.get(&m.id) {
+								Some(None) => {
+									ui.spinner();
+								}
+								Some(Some(Ok(t))) => {
+									ui.label(RichText::new(format!("{} {t}", i::CIRCLE_CHECK)).size(11.5).color(p.success));
+								}
+								Some(Some(Err(e))) => {
+									ui.label(RichText::new(format!("{} Not available", i::CIRCLE_ALERT)).size(11.5).color(p.danger)).on_hover_text(e);
+								}
+								None => {
+									if ui.small_button("Test").on_hover_text("Send a one-line message to check this model works on your plan").clicked() {
+										i.tests.insert(m.id.clone(), None);
+										let (info, ctx, exe, id) = (info.clone(), ui.ctx().clone(), exe.clone(), m.id.clone());
+										std::thread::spawn(move || {
+											let r = channel::test_model(ch, &exe, &id, &channel_workdir());
+											info.lock().tests.insert(id, Some(r));
+											ctx.request_repaint();
+										});
+									}
+								}
+							}
+						});
+					});
+				}
+				ui.horizontal(|ui| {
+					ui.add(egui::TextEdit::singleline(&mut i.custom_model).hint_text("other model id").desired_width(220.0));
+					let id = i.custom_model.trim().to_string();
+					if ui.add_enabled(!id.is_empty(), egui::Button::new("Use")).clicked() {
+						settings.model = format!("{}:{id}", ch.key());
+						settings.save();
+						i.custom_model.clear();
+					}
+				});
+			});
+			ui.add_space(6.0);
+		}
+		widgets::hint(ui, p, "The model works only through Takeoff Desk's drawing tools: no shell, files or web. detect, calibrate and trace sweeps call a vision model of their own, so they are available when you are signed in to construction.live (billed there) or have a local model loaded; without one, the agent marks from its own zoomed views.");
+	}
+
 	fn custom_tab(&mut self, ui: &mut egui::Ui, settings: &mut Settings, p: &Palette) {
 		widgets::hint(ui, p, "Any OpenAI-compatible server: LM Studio, Ollama (/v1), vLLM, OpenRouter, a llama-server you run yourself…");
 		egui::Grid::new("custom").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -968,6 +1396,61 @@ impl AiPanel {
 fn short_fit(f: &FitReport) -> String {
 	let gb = |b: u64| b as f64 / (1u64 << 30) as f64;
 	format!("Needs {:.1} GB · this computer allows {:.1} GB · {:.1} GB free now", gb(f.estimate.total()), gb(f.budget), gb(f.available_now))
+}
+
+/// An earlier conversation about one drawing, kept in history.
+struct PastChat {
+	file: PathBuf,
+	title: String,
+	saved_ms: i64,
+	messages: usize,
+}
+
+/// `chats/<drawing>.history/`: earlier conversations, one file each.
+fn history_dir(pdf: &std::path::Path) -> PathBuf {
+	chat_path(pdf).with_extension("history")
+}
+
+fn archive_chat(pdf: &std::path::Path, chat: &ChatSession) {
+	if chat.messages.is_empty() {
+		return;
+	}
+	let dir = history_dir(pdf);
+	let _ = std::fs::create_dir_all(&dir);
+	if let Ok(json) = serde_json::to_vec(chat) {
+		let _ = std::fs::write(dir.join(format!("{}.json", takeoff_core::now_ms())), json);
+	}
+}
+
+/// Newest first.
+fn past_chats(pdf: &std::path::Path) -> Vec<PastChat> {
+	let mut out: Vec<PastChat> = std::fs::read_dir(history_dir(pdf))
+		.into_iter()
+		.flatten()
+		.flatten()
+		.filter_map(|e| {
+			let file = e.path();
+			let saved_ms = file.file_stem()?.to_str()?.parse().ok()?;
+			let chat: ChatSession = serde_json::from_slice(&std::fs::read(&file).ok()?).ok()?;
+			let t = chat.transcript();
+			let title = t.iter().find(|e| e.role == Role::User).map(|e| e.text.clone()).unwrap_or_else(|| "Conversation".into());
+			let messages = t.iter().filter(|e| e.role != Role::Tool).count();
+			Some(PastChat { file, title, saved_ms, messages })
+		})
+		.collect();
+	out.sort_by_key(|c| std::cmp::Reverse(c.saved_ms));
+	out
+}
+
+/// "5 min ago", "3 h ago", else the date.
+fn ago(ms: i64) -> String {
+	let mins = (takeoff_core::now_ms() - ms).max(0) / 60_000;
+	match mins {
+		0 => "just now".into(),
+		1..=59 => format!("{mins} min ago"),
+		60..=1439 => format!("{} h ago", mins / 60),
+		_ => takeoff_core::time::date_from_ms(ms),
+	}
 }
 
 fn chat_path(pdf: &std::path::Path) -> PathBuf {
@@ -1100,4 +1583,82 @@ pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
 			}
 		});
 	}
+}
+
+/// The provider's badge for the current model id.
+fn provider_badge(model: &str) -> (Color32, &'static str) {
+	if model.starts_with("local:") {
+		(Color32::from_rgb(0x10, 0xB9, 0x81), i::CPU)
+	} else if model.starts_with("cloud:") {
+		(Color32::from_rgb(0xE8, 0x53, 0x1A), i::CLOUD)
+	} else if model.starts_with("claude:") {
+		(Color32::from_rgb(0xD9, 0x77, 0x57), i::SPARKLES)
+	} else if model.starts_with("codex:") {
+		(Color32::from_rgb(0x10, 0xA3, 0x7F), i::BOT)
+	} else if model == "custom" {
+		(Color32::from_rgb(0xA7, 0x8B, 0xFA), i::SERVER)
+	} else {
+		(Color32::from_gray(110), i::SPARKLES)
+	}
+}
+
+fn group_header(ui: &mut egui::Ui, p: &Palette, icon: &str, title: &str, note: &str) {
+	ui.horizontal(|ui| {
+		ui.add_space(6.0);
+		ui.label(RichText::new(icon).font(theme::icon_font(11.0)).color(p.muted));
+		ui.label(RichText::new(title.to_uppercase()).font(theme::semibold(10.5)).color(p.muted).extra_letter_spacing(0.6));
+		ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+			ui.add_space(6.0);
+			ui.label(RichText::new(note).size(11.0).color(p.muted));
+		});
+	});
+}
+
+/// One choice: badge, title, one-line description, check when selected.
+fn model_row(ui: &mut egui::Ui, p: &Palette, badge: (Color32, &str), title: &str, sub: &str, selected: bool, enabled: bool) -> egui::Response {
+	let w = ui.available_width();
+	let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 44.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+	let painter = ui.painter();
+	if selected {
+		painter.rect_filled(rect, 6.0, if p.dark { Color32::from_rgb(0x2A, 0x1E, 0x18) } else { Color32::from_rgb(0xFD, 0xEE, 0xE7) });
+	} else if r.hovered() && enabled {
+		painter.rect_filled(rect, 6.0, p.hover);
+	}
+	let alpha = if enabled { 1.0 } else { 0.45 };
+	let fade = |c: Color32| c.gamma_multiply(alpha);
+	let b = egui::Rect::from_min_size(rect.left_center() + egui::vec2(8.0, -13.0), egui::vec2(26.0, 26.0));
+	painter.rect_filled(b, 6.0, fade(badge.0));
+	painter.text(b.center(), egui::Align2::CENTER_CENTER, badge.1, theme::icon_font(13.0), fade(Color32::WHITE));
+	let x = b.right() + 10.0;
+	let maxw = rect.right() - 34.0 - x;
+	let t = painter.layout(title.to_string(), theme::semibold(13.0), fade(p.text), maxw);
+	painter.galley(egui::pos2(x, rect.top() + 5.0), t, fade(p.text));
+	let s = painter.layout(sub.to_string(), egui::FontId::proportional(11.5), fade(p.text2), maxw);
+	painter.galley(egui::pos2(x, rect.top() + 24.0), s, fade(p.text2));
+	if selected {
+		painter.text(rect.right_center() - egui::vec2(16.0, 0.0), egui::Align2::CENTER_CENTER, i::CHECK, theme::icon_font(15.0), p.accent);
+	}
+	if r.hovered() && enabled {
+		ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+	}
+	r
+}
+
+/// A row that leads somewhere (set up, sign in, manage).
+fn action_row(ui: &mut egui::Ui, p: &Palette, icon: &str, title: &str, sub: &str) -> egui::Response {
+	let w = ui.available_width();
+	let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::click());
+	let painter = ui.painter();
+	if r.hovered() {
+		painter.rect_filled(rect, 6.0, p.hover);
+		ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+	}
+	let b = egui::Rect::from_min_size(rect.left_center() + egui::vec2(8.0, -13.0), egui::vec2(26.0, 26.0));
+	painter.rect_stroke(b, 6.0, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+	painter.text(b.center(), egui::Align2::CENTER_CENTER, icon, theme::icon_font(13.0), p.accent);
+	let x = b.right() + 10.0;
+	painter.text(egui::pos2(x, rect.top() + 5.0), egui::Align2::LEFT_TOP, title, theme::semibold(12.5), p.accent);
+	painter.text(egui::pos2(x, rect.top() + 23.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), p.text2);
+	painter.text(rect.right_center() - egui::vec2(16.0, 0.0), egui::Align2::CENTER_CENTER, i::CHEVRON_RIGHT, theme::icon_font(13.0), p.muted);
+	r
 }

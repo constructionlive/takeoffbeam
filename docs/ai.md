@@ -114,3 +114,23 @@ These are measurements from Qwen3.8 27B (Q4_K_M) on an M3 Max with 36 GB.
   it on in *Models* for hard sheets.
 - **Not yet verified with a live local model:** full symbol sweeps (`detect`), `trace` and
   `follow_line`. They are covered by tests with a scripted model.
+
+## Your own Claude Code or Codex
+
+If you already pay for Claude or ChatGPT, *Models → Subscriptions* runs the agent on the Claude
+Code or Codex CLI installed on your computer, under the sign-in you already have. Takeoff Desk
+never sees or stores your credentials.
+
+- The CLI runs headless in an empty folder of ours, with only the drawing tools allowed (no shell,
+  no file edits). The tools come from the app over a private local MCP bridge, so marks appear
+  live and are undoable like any other.
+- Usage counts against your plan's limits, not construction.live credits.
+- Codex is found even when it only ships inside the ChatGPT desktop app. Sign in once with
+  `codex login`.
+- Symbol sweeps (`detect`, `calibrate`, `trace`) make their own vision calls. They use your
+  construction.live model or a loaded local model.
+
+> **Note on Claude plans:** Anthropic's terms ask third-party apps to use API keys and not to
+> route requests through Pro/Max plan credentials without Anthropic's approval. See
+> code.claude.com/docs/en/legal-and-compliance. Takeoff Desk only launches the unmodified Claude
+> Code that you signed in to yourself. Distributors should confirm this use with Anthropic.

@@ -35,25 +35,39 @@ pub fn start_turn(session: Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text
 }
 
 fn context_line(ctx: &AgentContext, drawing: &takeoff_pdf::Drawing) -> String {
+	viewer_line(&ctx.doc, drawing, ctx.current_page, ctx.visible_region, &ctx.selected_ids)
+}
+
+/// What the estimator is looking at, sent (not shown) with each message.
+pub(crate) fn viewer_line(doc: &Mutex<takeoff_core::Document>, drawing: &takeoff_pdf::Drawing, current_page: u32, visible_region: Option<(f64, f64, f64, f64)>, selected_ids: &[String]) -> String {
 	let n = drawing.page_count();
-	let label = drawing.page_label(ctx.current_page).ok().flatten().filter(|l| *l != ctx.current_page.to_string());
-	let mut s = format!("[Viewer: page {} of {n}{}", ctx.current_page, label.map(|l| format!(" ({l})")).unwrap_or_default());
-	if let Some(r) = ctx.visible_region {
+	let label = drawing.page_label(current_page).ok().flatten().filter(|l| *l != current_page.to_string());
+	let mut s = format!("[Viewer: page {current_page} of {n}{}", label.map(|l| format!(" ({l})")).unwrap_or_default());
+	if let Some(r) = visible_region {
 		if r.2 * r.3 < 0.95 {
 			s.push_str(&format!(" · zoomed to x={:.2} y={:.2} w={:.2} h={:.2}", r.0, r.1, r.2, r.3));
 		}
 	}
-	if !ctx.selected_ids.is_empty() {
-		let ids: Vec<&str> = ctx.selected_ids.iter().take(20).map(String::as_str).collect();
+	if !selected_ids.is_empty() {
+		let ids: Vec<&str> = selected_ids.iter().take(20).map(String::as_str).collect();
 		s.push_str(&format!(" · selected: {}", ids.join(", ")));
 	}
-	let has_scale = ctx.doc.lock().data.scale_for(ctx.current_page).is_some();
+	let has_scale = doc.lock().data.scale_for(current_page).is_some();
 	s.push_str(if has_scale { " · page is scaled" } else { " · page has no scale" });
 	s.push(']');
 	s
 }
 
-fn thumb(png: &[u8]) -> Option<(image::RgbaImage, Vec<u8>)> {
+/// Cap a tool's text so one result can't flood the context.
+pub(crate) fn clip_tool_text(text: &mut String) {
+	if text.len() > TOOL_TEXT_LIMIT {
+		let cut = text.char_indices().nth(TOOL_TEXT_LIMIT).map(|(i, _)| i).unwrap_or(text.len());
+		text.truncate(cut);
+		text.push_str("\n… (truncated — narrow the request)");
+	}
+}
+
+pub(crate) fn thumb(png: &[u8]) -> Option<(image::RgbaImage, Vec<u8>)> {
 	let img = image::load_from_memory(png).ok()?.to_rgba8();
 	let (w, h) = img.dimensions();
 	let s = (480.0 / w.max(h) as f32).min(1.0);
@@ -138,11 +152,7 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 					Err(e) => (false, format!("Error: {e}"), vec![]),
 				}
 			};
-			if text.len() > TOOL_TEXT_LIMIT {
-				let cut = text.char_indices().nth(TOOL_TEXT_LIMIT).map(|(i, _)| i).unwrap_or(text.len());
-				text.truncate(cut);
-				text.push_str("\n… (truncated — narrow the request)");
-			}
+			clip_tool_text(&mut text);
 			let mut tool_images = Vec::new();
 			let mut captions = Vec::new();
 			let mut first_thumb = None;

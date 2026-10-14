@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use takeoff_app::app::TakeoffApp;
 use takeoff_app::settings::{Settings, ThemeChoice};
@@ -179,4 +180,28 @@ fn update_banner_snapshot() {
 	h.run_steps(3);
 	settle(&mut h, |_| false, Duration::from_secs(2));
 	save(&mut h, "dark-update");
+}
+
+#[test]
+#[ignore]
+fn subscriptions_snapshot() {
+	// Shows whatever Claude Code / Codex this machine has (installed, signed in).
+	for (tag, theme) in [("dark", ThemeChoice::Dark), ("light", ThemeChoice::Light)] {
+		let mut h = harness(theme);
+		h.run_steps(3);
+		h.state_mut().as_mut().unwrap().debug_open_models(3);
+		settle(&mut h, |_| false, Duration::from_secs(12));
+		save(&mut h, &format!("{tag}-subscriptions"));
+		// The picker's dropdown on the AI tab lists them too.
+		h.state_mut().as_mut().unwrap().debug_close_models();
+		let pdf = std::env::var("SNAP_PDF").unwrap_or_else(|_| "/Users/office/Downloads/drawing.pdf".into());
+		let ctx = h.ctx.clone();
+		h.state_mut().as_mut().unwrap().open(pdf.into(), &ctx);
+		settle(&mut h, |a| a.debug_doc().is_some_and(|d| d.loaded), Duration::from_secs(20));
+		h.state_mut().as_mut().unwrap().debug_right_tab(2);
+		h.run_steps(3);
+		h.get_by_label_contains("Model:").click();
+		settle(&mut h, |_| false, Duration::from_secs(2));
+		save(&mut h, &format!("{tag}-model-menu"));
+	}
 }

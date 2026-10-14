@@ -6,6 +6,11 @@ use eframe::egui;
 use takeoff_app::{app::TakeoffApp, settings::Settings, EframeApp};
 
 fn main() -> eframe::Result {
+	// Claude Code / Codex start us as their MCP server: pipe to the running app.
+	let args: Vec<String> = std::env::args().collect();
+	if args.get(1).map(String::as_str) == Some(takeoff_agent::channel::BRIDGE_ARG) {
+		std::process::exit(takeoff_agent::channel::run_bridge(args.get(2).map(String::as_str).unwrap_or("")));
+	}
 	let settings = Settings::load();
 	let files: Vec<std::path::PathBuf> = std::env::args().skip(1).map(Into::into).filter(|p: &std::path::PathBuf| p.exists()).collect();
 	let icon = image::load_from_memory(include_bytes!("../../../assets/icon.png")).ok().map(|i| {

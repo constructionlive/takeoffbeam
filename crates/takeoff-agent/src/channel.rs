@@ -1,0 +1,1250 @@
+//! Subscription channels: run a Bench turn on the estimator's own Claude Code
+//! or Codex CLI (their Claude / ChatGPT plan) instead of an API endpoint.
+//!
+//! The CLI runs headless (`claude -p --output-format stream-json`, `codex exec
+//! --json`) in a scratch folder, with the Bench instructions in front of the
+//! chat, and gets the drawing tools from the app over MCP: the CLI launches
+//! this app's own executable with [`BRIDGE_ARG`], which pipes its stdio to a
+//! [`ToolHost`] listening on localhost inside the app. Tools run against the
+//! live document, so marks appear as they are placed, exactly as with the
+//! built-in agent, and the turn streams the same [`AgentEvent`]s.
+//!
+//! No keys or OAuth here: the CLIs use whatever sign-in they already have.
+
+use std::collections::HashSet;
+use std::hash::{BuildHasher, Hasher};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{unbounded, Sender};
+use parking_lot::Mutex;
+use serde_json::{json, Value};
+use takeoff_core::Document;
+
+use crate::agent::{clip_tool_text, thumb, viewer_line};
+use crate::llm::ToolCall;
+use crate::prompt::system_prompt;
+use crate::session::{ChatSession, ExternalThread, Msg};
+use crate::tools::{self, ToolCtx};
+use crate::{mcp, AgentEvent, ProviderConfig, TurnHandle};
+
+/// `takeoff-desk --mcp-bridge <addr>`: the stdio MCP server the CLIs launch.
+pub const BRIDGE_ARG: &str = "--mcp-bridge";
+const TOKEN_ENV: &str = "TAKEOFF_BRIDGE_TOKEN";
+/// MCP server name the CLIs see (Claude Code calls the tools `mcp__takeoff__view` …).
+const SERVER: &str = "takeoff";
+/// Sweeps that make their own vision calls to an OpenAI-compatible model.
+const SWEEPS: [&str; 3] = ["detect", "calibrate", "trace"];
+/// Sweeps tile a whole sheet; the CLIs' default MCP timeouts are far shorter.
+const TOOL_TIMEOUT_SECS: u64 = 900;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Channel {
+	ClaudeCode,
+	Codex,
+}
+
+impl Channel {
+	pub const ALL: [Channel; 2] = [Channel::ClaudeCode, Channel::Codex];
+
+	/// Stored in settings (`claude:<model>`) and in [`ExternalThread::channel`].
+	pub fn key(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "claude",
+			Channel::Codex => "codex",
+		}
+	}
+
+	pub fn from_key(k: &str) -> Option<Self> {
+		Self::ALL.into_iter().find(|c| c.key() == k)
+	}
+
+	pub fn name(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "Claude Code",
+			Channel::Codex => "Codex",
+		}
+	}
+
+	pub fn plan(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "Claude Pro, Max, Team or Enterprise",
+			Channel::Codex => "ChatGPT Plus, Pro, Business or Enterprise",
+		}
+	}
+
+	pub fn install_command(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
+			Channel::Codex => "npm install -g @openai/codex",
+		}
+	}
+
+	pub fn login_command(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "claude auth login",
+			Channel::Codex => "codex login",
+		}
+	}
+
+	fn exe_name(self) -> &'static str {
+		self.key()
+	}
+}
+
+// ── Finding and running the CLIs ────────────────────────────────────────
+
+/// Where CLIs get installed. Apps opened from the Finder / Start menu don't
+/// get the shell's PATH, so look in the usual places too.
+fn search_dirs() -> Vec<PathBuf> {
+	let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+	if let Some(home) = dirs::home_dir() {
+		for d in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin", "bin"] {
+			dirs.push(home.join(d));
+		}
+		if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+			let mut nvm: Vec<PathBuf> = rd.flatten().map(|e| e.path().join("bin")).collect();
+			nvm.sort();
+			dirs.extend(nvm.into_iter().rev());
+		}
+	}
+	if cfg!(windows) {
+		for var in ["APPDATA", "LOCALAPPDATA"] {
+			if let Some(d) = std::env::var_os(var) {
+				dirs.push(PathBuf::from(&d).join("npm"));
+			}
+		}
+	} else {
+		dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from));
+	}
+	let mut seen = HashSet::new();
+	dirs.retain(|d| seen.insert(d.clone()));
+	dirs
+}
+
+/// The CLI's executable, if it is installed.
+pub fn find_exe(channel: Channel) -> Option<PathBuf> {
+	let name = channel.exe_name();
+	let names: Vec<String> = if cfg!(windows) { vec![format!("{name}.exe"), format!("{name}.cmd")] } else { vec![name.to_string()] };
+	// The first one that actually runs: wrapper scripts and stale shims that
+	// shadow the real binary on PATH are skipped.
+	search_dirs()
+		.into_iter()
+		.flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>())
+		.chain(bundled(channel))
+		.filter(|p| p.is_file())
+		.find(|p| runs(p))
+}
+
+fn runs(exe: &Path) -> bool {
+	let mut cmd = command(exe);
+	cmd.arg("--version");
+	run(cmd, "", Duration::from_secs(8)).is_ok_and(|r| r.ok && !r.stdout.trim().is_empty())
+}
+
+/// CLIs that ship inside desktop apps (the ChatGPT / Codex apps bundle `codex`)
+/// for people who never installed them on their own.
+fn bundled(channel: Channel) -> Vec<PathBuf> {
+	let mut out = Vec::new();
+	if cfg!(target_os = "macos") {
+		let apps: &[&str] = match channel {
+			Channel::Codex => &["ChatGPT.app/Contents/Resources/codex", "Codex.app/Contents/Resources/codex"],
+			Channel::ClaudeCode => &["Claude.app/Contents/Resources/claude"],
+		};
+		for root in [PathBuf::from("/Applications"), dirs::home_dir().unwrap_or_default().join("Applications")] {
+			out.extend(apps.iter().map(|a| root.join(a)));
+		}
+	}
+	out
+}
+
+/// A command for a CLI: no console window, and a PATH that also finds the
+/// `node` an npm-installed CLI needs.
+fn command(exe: &Path) -> Command {
+	#[allow(unused_mut)]
+	let mut cmd = Command::new(exe);
+	let mut path: Vec<PathBuf> = exe.parent().map(|p| vec![p.to_path_buf()]).unwrap_or_default();
+	path.extend(search_dirs());
+	if let Ok(p) = std::env::join_paths(path) {
+		cmd.env("PATH", p);
+	}
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+		cmd.creation_flags(CREATE_NO_WINDOW);
+	}
+	cmd
+}
+
+struct Ran {
+	ok: bool,
+	stdout: String,
+	stderr: String,
+}
+
+/// Run to completion with `stdin` fed in; killed after `timeout`.
+fn run(mut cmd: Command, stdin: &str, timeout: Duration) -> Result<Ran, String> {
+	let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+	if let Some(mut si) = child.stdin.take() {
+		let _ = si.write_all(stdin.as_bytes());
+	}
+	let read = |r: Option<Box<dyn Read + Send>>| {
+		std::thread::spawn(move || {
+			let mut s = String::new();
+			if let Some(mut r) = r {
+				let _ = r.read_to_string(&mut s);
+			}
+			s
+		})
+	};
+	let out = read(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+	let err = read(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+	let start = Instant::now();
+	let status = loop {
+		if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
+			break s;
+		}
+		if start.elapsed() > timeout {
+			let _ = child.kill();
+			let _ = child.wait();
+			return Err(format!("timed out after {}s", timeout.as_secs()));
+		}
+		std::thread::sleep(Duration::from_millis(50));
+	};
+	Ok(Ran { ok: status.success(), stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() })
+}
+
+fn tail(s: &str, n: usize) -> String {
+	let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+	lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+// ── Status and models ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChannelStatus {
+	pub exe: Option<PathBuf>,
+	pub version: Option<String>,
+	/// None when it couldn't be told.
+	pub signed_in: Option<bool>,
+	/// "Max plan", "ChatGPT", "API key"…
+	pub account: Option<String>,
+	pub error: Option<String>,
+}
+
+/// Installed? Which version? Signed in, and with what? Runs the CLI (a few seconds at most).
+pub fn status(channel: Channel) -> ChannelStatus {
+	let Some(exe) = find_exe(channel) else { return ChannelStatus::default() };
+	let mut st = ChannelStatus { exe: Some(exe.clone()), ..Default::default() };
+	let mut v = command(&exe);
+	v.arg("--version");
+	match run(v, "", Duration::from_secs(20)) {
+		Ok(r) if r.ok => st.version = r.stdout.lines().next().map(|l| l.trim().to_string()),
+		Ok(r) => st.error = Some(tail(&format!("{}\n{}", r.stdout, r.stderr), 3)),
+		Err(e) => st.error = Some(e),
+	}
+	let mut a = command(&exe);
+	match channel {
+		Channel::ClaudeCode => {
+			a.args(["auth", "status", "--json"]);
+			if let Ok(r) = run(a, "", Duration::from_secs(20)) {
+				if let Ok(j) = serde_json::from_str::<Value>(&r.stdout) {
+					st.signed_in = j.get("loggedIn").and_then(Value::as_bool);
+					let plan = j.get("subscriptionType").and_then(Value::as_str).filter(|s| !s.is_empty());
+					let method = j.get("authMethod").and_then(Value::as_str).unwrap_or("");
+					st.account = match plan {
+						Some(p) => Some(format!("{}{} plan", p[..1].to_uppercase(), &p[1..])),
+						None if method.to_lowercase().contains("key") => Some("API key (billed per token)".into()),
+						None => None,
+					};
+				}
+			}
+		}
+		Channel::Codex => {
+			a.args(["login", "status"]);
+			if let Ok(r) = run(a, "", Duration::from_secs(20)) {
+				let text = format!("{}\n{}", r.stdout, r.stderr);
+				st.signed_in = Some(r.ok && text.to_lowercase().contains("logged in"));
+				if r.ok {
+					st.account = text.lines().find(|l| l.to_lowercase().contains("logged in")).map(|l| l.trim().trim_start_matches("Logged in using ").trim_start_matches("Logged in with ").to_string());
+				}
+			}
+		}
+	}
+	st
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelModel {
+	/// What goes to `--model`; empty = the CLI's own default.
+	pub id: String,
+	pub label: String,
+	pub note: String,
+}
+
+/// Models the CLI offers. Codex asks the account's catalog; Claude Code takes
+/// aliases that always point at the newest model of each tier.
+pub fn models(channel: Channel, exe: &Path) -> Result<Vec<ChannelModel>, String> {
+	let m = |id: &str, label: &str, note: &str| ChannelModel { id: id.into(), label: label.into(), note: note.into() };
+	match channel {
+		Channel::ClaudeCode => Ok(vec![
+			m("", "Default", "Whatever your plan uses by default"),
+			m("fable", "Fable", "Largest model"),
+			m("opus", "Opus", "Strongest for careful takeoffs"),
+			m("sonnet", "Sonnet", "Fast and capable"),
+			m("haiku", "Haiku", "Fastest, lightest"),
+		]),
+		Channel::Codex => {
+			let mut c = command(exe);
+			c.args(["debug", "models"]);
+			let r = run(c, "", Duration::from_secs(45))?;
+			if !r.ok {
+				return Err(tail(&r.stderr, 3));
+			}
+			let v: Value = serde_json::from_str(&r.stdout).map_err(|e| format!("unexpected model list: {e}"))?;
+			Ok(parse_codex_models(&v))
+		}
+	}
+}
+
+fn parse_codex_models(v: &Value) -> Vec<ChannelModel> {
+	let mut list: Vec<(i64, ChannelModel)> = v
+		.get("models")
+		.and_then(Value::as_array)
+		.into_iter()
+		.flatten()
+		.filter(|m| m.get("visibility").and_then(Value::as_str).is_none_or(|s| s == "list"))
+		// The Bench works from renders: text-only models can't do takeoff.
+		.filter(|m| m.get("input_modalities").and_then(Value::as_array).is_none_or(|a| a.iter().any(|x| x == "image")))
+		.filter_map(|m| {
+			let id = m.get("slug").and_then(Value::as_str)?.to_string();
+			let label = m.get("display_name").and_then(Value::as_str).unwrap_or(&id).to_string();
+			let note = m.get("description").and_then(Value::as_str).unwrap_or("").to_string();
+			Some((m.get("priority").and_then(Value::as_i64).unwrap_or(999), ChannelModel { id, label, note }))
+		})
+		.collect();
+	list.sort_by_key(|(p, _)| *p);
+	let mut out = vec![ChannelModel { id: String::new(), label: "Default".into(), note: "The model set in your Codex config".into() }];
+	out.extend(list.into_iter().map(|(_, m)| m));
+	out
+}
+
+/// Send a one-line prompt to see whether `model` works on this account.
+/// Ok carries what to show ("Works · claude-opus-5-5").
+pub fn test_model(channel: Channel, exe: &Path, model: &str, workdir: &Path) -> Result<String, String> {
+	let _ = std::fs::create_dir_all(workdir);
+	let mut c = command(exe);
+	c.current_dir(workdir);
+	let prompt = "Reply with the single word OK.";
+	match channel {
+		Channel::ClaudeCode => {
+			c.args(["-p", "--output-format", "json", "--no-session-persistence", "--tools", ""]);
+			if !model.is_empty() {
+				c.args(["--model", model]);
+			}
+			let r = run(c, prompt, Duration::from_secs(120))?;
+			let v: Value = serde_json::from_str(r.stdout.trim()).map_err(|_| tail(&format!("{}\n{}", r.stdout, r.stderr), 3))?;
+			if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+				return Err(v.get("result").and_then(Value::as_str).unwrap_or("error").to_string());
+			}
+			let used: Vec<String> = v.get("modelUsage").and_then(Value::as_object).map(|o| o.keys().cloned().collect()).unwrap_or_default();
+			Ok(if used.is_empty() { "Works".into() } else { format!("Works · {}", used.join(", ")) })
+		}
+		Channel::Codex => {
+			c.args(["exec", "--json", "--skip-git-repo-check", "--ephemeral", "-s", "read-only"]);
+			if !model.is_empty() {
+				c.args(["-m", model]);
+			}
+			c.arg("-");
+			let r = run(c, prompt, Duration::from_secs(120))?;
+			let mut p = CodexParser::default();
+			let mut err = None;
+			let mut done = false;
+			for line in r.stdout.lines() {
+				for ev in p.line(line) {
+					match ev {
+						Ev::Error(e) => err = Some(e),
+						Ev::Done => done = true,
+						_ => {}
+					}
+				}
+			}
+			match (done, err) {
+				(_, Some(e)) => Err(e),
+				(true, None) => Ok("Works".into()),
+				(false, None) => Err(tail(&r.stderr, 3)),
+			}
+		}
+	}
+}
+
+// ── Tool host (in the app) and bridge (in the CLI's child process) ─────
+
+/// One turn's wiring into the host: where events go, what the tools see.
+#[derive(Clone)]
+struct Link {
+	tx: Sender<AgentEvent>,
+	session: Arc<Mutex<ChatSession>>,
+	cancel: Arc<AtomicBool>,
+	current_page: u32,
+	/// Model id the coordinate dialect is chosen for.
+	model: String,
+	sweeps: Option<ProviderConfig>,
+	/// Assistant text streamed since the last tool call (recorded before the call).
+	pending: Arc<Mutex<String>>,
+}
+
+struct Shared {
+	doc: Arc<Mutex<Document>>,
+	pdf: PathBuf,
+	token: String,
+	/// Kept across turns so view ids from earlier turns stay valid.
+	ctx: Mutex<Option<ToolCtx>>,
+	link: Mutex<Option<Link>>,
+	stop: AtomicBool,
+	calls: AtomicU64,
+}
+
+/// Serves the drawing tools for ONE open document on 127.0.0.1, to bridges
+/// that present the right token.
+pub struct ToolHost {
+	addr: SocketAddr,
+	shared: Arc<Shared>,
+}
+
+fn random_token() -> String {
+	let mut s = String::new();
+	for i in 0..2u64 {
+		let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+		h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+		h.write_u64(i ^ std::process::id() as u64);
+		s.push_str(&format!("{:016x}", h.finish()));
+	}
+	s
+}
+
+impl ToolHost {
+	pub fn start(doc: Arc<Mutex<Document>>, pdf: PathBuf) -> Result<Self, String> {
+		let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("could not open the tool port: {e}"))?;
+		let addr = listener.local_addr().map_err(|e| e.to_string())?;
+		let shared = Arc::new(Shared { doc, pdf, token: random_token(), ctx: Mutex::new(None), link: Mutex::new(None), stop: AtomicBool::new(false), calls: AtomicU64::new(0) });
+		let sh = shared.clone();
+		std::thread::Builder::new()
+			.name("takeoff-tool-host".into())
+			.spawn(move || {
+				for stream in listener.incoming() {
+					if sh.stop.load(Ordering::Relaxed) {
+						break;
+					}
+					if let Ok(s) = stream {
+						let sh = sh.clone();
+						let _ = std::thread::Builder::new().name("takeoff-tool-conn".into()).spawn(move || sh.serve(s));
+					}
+				}
+			})
+			.map_err(|e| e.to_string())?;
+		Ok(Self { addr, shared })
+	}
+
+	/// Whether this host works on `doc` (a reopened file gets a new document).
+	pub fn serves(&self, doc: &Arc<Mutex<Document>>) -> bool {
+		Arc::ptr_eq(&self.shared.doc, doc)
+	}
+}
+
+impl Drop for ToolHost {
+	fn drop(&mut self) {
+		self.shared.stop.store(true, Ordering::Relaxed);
+		// Wake the accept loop so it sees the flag.
+		let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(200));
+	}
+}
+
+fn attach(ctx: &mut ToolCtx, link: &Link, doc: &Mutex<Document>) {
+	ctx.events = Some(link.tx.clone());
+	ctx.cancel = Some(link.cancel.clone());
+	ctx.current_page = link.current_page;
+	ctx.llm = link.sweeps.clone();
+	ctx.model_id = link.model.clone();
+	ctx.dialect = takeoff_core::coords::dialect_for(&link.model);
+	let hidden: HashSet<String> = doc.lock().data.hidden_layers.iter().cloned().collect();
+	let _ = ctx.drawing.set_hidden_layers(&hidden);
+}
+
+impl Shared {
+	fn begin(&self, link: Link) {
+		if let Some(ctx) = self.ctx.lock().as_mut() {
+			attach(ctx, &link, &self.doc);
+		}
+		*self.link.lock() = Some(link);
+	}
+
+	fn end(&self) {
+		*self.link.lock() = None;
+	}
+
+	fn serve(&self, stream: TcpStream) {
+		let Ok(read) = stream.try_clone() else { return };
+		let mut reader = BufReader::new(read);
+		let mut writer = stream;
+		let mut first = String::new();
+		if reader.read_line(&mut first).is_err() || first.trim() != self.token {
+			return;
+		}
+		for line in reader.lines() {
+			let Ok(line) = line else { break };
+			if line.trim().is_empty() {
+				continue;
+			}
+			let reply = match serde_json::from_str::<Value>(&line) {
+				Ok(msg) => mcp::reply(&msg, || self.list(), |name, args| self.call(name, args)),
+				Err(e) => Some(mcp::error(&Value::Null, -32700, &format!("parse error: {e}"))),
+			};
+			if let Some(r) = reply {
+				if writeln!(writer, "{r}").and_then(|_| writer.flush()).is_err() {
+					break;
+				}
+			}
+		}
+	}
+
+	fn list(&self) -> Value {
+		let sweeps = self.link.lock().as_ref().is_some_and(|l| l.sweeps.is_some());
+		mcp::tool_list(vec![], if sweeps { &[] } else { &SWEEPS })
+	}
+
+	fn call(&self, name: &str, args: Value) -> Value {
+		let Some(link) = self.link.lock().clone() else { return mcp::text_result("The Takeoff Desk turn has ended; nothing was changed.", true) };
+		if link.cancel.load(Ordering::Relaxed) {
+			return mcp::text_result("Cancelled by the user.", true);
+		}
+		let mut guard = self.ctx.lock();
+		if guard.is_none() {
+			match takeoff_pdf::Drawing::open(&self.pdf) {
+				Ok(d) => {
+					let mut ctx = ToolCtx::new(self.doc.clone(), d, &link.model, None);
+					attach(&mut ctx, &link, &self.doc);
+					*guard = Some(ctx);
+				}
+				Err(e) => return mcp::text_result(format!("could not open the drawing: {e}"), true),
+			}
+		}
+		let ctx = guard.as_mut().expect("tool context");
+		let call_id = format!("{SERVER}_{}", self.calls.fetch_add(1, Ordering::Relaxed) + 1);
+		let text_before = std::mem::take(&mut *link.pending.lock());
+		link.session.lock().messages.push(Msg::Assistant { text: text_before, reasoning: String::new(), tool_calls: vec![ToolCall { id: call_id.clone(), name: name.to_string(), arguments: args.to_string() }] });
+		let _ = link.tx.send(AgentEvent::ToolStarted { call_id: call_id.clone(), name: name.to_string(), args: args.clone() });
+		let (ok, text, images, result) = match tools::call(ctx, name, args) {
+			Ok(mut out) => {
+				clip_tool_text(&mut out.text);
+				let r = mcp::output_result(&out);
+				(true, out.text, out.images, r)
+			}
+			Err(e) => (false, format!("Error: {e}"), vec![], mcp::text_result(e, true)),
+		};
+		let first_thumb = images.first().and_then(|i| thumb(&i.png));
+		let summary = text.lines().next().unwrap_or("").chars().take(300).collect::<String>();
+		let _ = link.tx.send(AgentEvent::ToolFinished { call_id: call_id.clone(), name: name.to_string(), ok, summary, image: first_thumb.as_ref().map(|t| t.0.clone()) });
+		link.session.lock().messages.push(Msg::Tool {
+			call_id,
+			name: name.to_string(),
+			text,
+			ok,
+			// The CLI holds the renders; keep captions so a later model knows they existed.
+			images: vec![],
+			image_captions: images.iter().map(|i| i.caption.clone()).collect(),
+			thumb: first_thumb.map(|t| Arc::new(t.1)),
+		});
+		result
+	}
+}
+
+/// Body of `takeoff-desk --mcp-bridge <addr>`: pipe stdio to the app's tool
+/// host. Returns the process exit code.
+pub fn run_bridge(addr: &str) -> i32 {
+	let token = std::env::var(TOKEN_ENV).unwrap_or_default();
+	let Ok(mut stream) = TcpStream::connect(addr) else {
+		eprintln!("takeoff bridge: Takeoff Desk is not listening on {addr}");
+		return 1;
+	};
+	if writeln!(stream, "{token}").is_err() {
+		return 1;
+	}
+	let Ok(mut up) = stream.try_clone() else { return 1 };
+	std::thread::spawn(move || {
+		let _ = std::io::copy(&mut std::io::stdin().lock(), &mut up);
+		let _ = up.shutdown(Shutdown::Write);
+	});
+	// Stdout is line-buffered, so each JSON-RPC reply goes out as it arrives.
+	let _ = std::io::copy(&mut stream, &mut std::io::stdout().lock());
+	0
+}
+
+// ── Running a turn ─────────────────────────────────────────────────────
+
+/// One Bench turn on a subscription channel.
+pub struct ChannelTurn {
+	pub channel: Channel,
+	pub exe: PathBuf,
+	/// Empty = the CLI's default.
+	pub model: String,
+	/// Where the CLI runs (an empty folder of the app's; Claude Code keys its
+	/// sessions by folder, so keep it stable).
+	pub workdir: PathBuf,
+	/// Model for detect / calibrate / trace, which make their own vision
+	/// calls; None leaves them out of the tool list.
+	pub sweeps: Option<ProviderConfig>,
+	pub current_page: u32,
+	pub visible_region: Option<(f64, f64, f64, f64)>,
+	pub selected_ids: Vec<String>,
+}
+
+pub fn start_turn(host: &ToolHost, session: Arc<Mutex<ChatSession>>, turn: ChannelTurn, user_text: String) -> TurnHandle {
+	let (tx, rx) = unbounded();
+	let cancel = Arc::new(AtomicBool::new(false));
+	let c2 = cancel.clone();
+	let shared = host.shared.clone();
+	let addr = host.addr;
+	std::thread::Builder::new()
+		.name("takeoff-channel".into())
+		.spawn(move || {
+			let steps = run_turn(&shared, addr, &session, turn, user_text, &tx, &c2);
+			shared.end();
+			let _ = tx.send(AgentEvent::Done { steps });
+		})
+		.expect("spawn channel thread");
+	TurnHandle { events: rx, cancel }
+}
+
+fn channel_note(channel: Channel, sweeps: bool) -> String {
+	let names = match channel {
+		Channel::ClaudeCode => " (here they are named mcp__takeoff__view, mcp__takeoff__add_marks and so on)",
+		Channel::Codex => "",
+	};
+	let mut s = format!(
+		"\n\n# This session\n\nYou are running in {} on the estimator's own subscription. Your drawing tools come from the MCP server \"{SERVER}\"{names}. Use only those tools: no shell, files or web. Each message starts with a [Viewer: …] line saying what the estimator is looking at.",
+		channel.name()
+	);
+	if !sweeps {
+		s.push_str(" detect, calibrate and trace are not available in this session (they need a construction.live or local vision model selected in Takeoff Desk): find symbols yourself in zoomed views and place them with add_marks, region by region on busy sheets.");
+	}
+	s
+}
+
+/// The chat so far, for a CLI that is joining it fresh (another model ran
+/// the earlier turns, or the old session could not be resumed).
+fn history_preamble(session: &ChatSession) -> String {
+	let msgs = &session.messages[..session.messages.len().saturating_sub(1)];
+	if msgs.is_empty() && session.summary.is_none() {
+		return String::new();
+	}
+	let mut lines = Vec::new();
+	for m in msgs {
+		match m {
+			Msg::User { text, .. } => lines.push(format!("Estimator: {text}")),
+			Msg::Assistant { text, .. } if !text.trim().is_empty() => lines.push(format!("Bench: {text}")),
+			Msg::Tool { name, text, .. } => lines.push(format!("  ({name} → {})", text.lines().next().unwrap_or("").chars().take(160).collect::<String>())),
+			_ => {}
+		}
+	}
+	let mut body = lines.join("\n");
+	const MAX: usize = 8000;
+	if body.len() > MAX {
+		let cut = body.char_indices().map(|(i, _)| i).find(|&i| i >= body.len() - MAX).unwrap_or(0);
+		body = format!("…{}", &body[cut..]);
+	}
+	let summary = session.summary.as_ref().map(|s| format!("Summary of earlier turns:\n{s}\n\n")).unwrap_or_default();
+	format!("<earlier_in_this_chat>\n{summary}{body}\n</earlier_in_this_chat>\n\n")
+}
+
+fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSession>>, turn: ChannelTurn, user_text: String, tx: &Sender<AgentEvent>, cancel: &Arc<AtomicBool>) -> u32 {
+	let drawing = match takeoff_pdf::Drawing::open(&shared.pdf) {
+		Ok(d) => d,
+		Err(e) => {
+			let _ = tx.send(AgentEvent::Error(format!("could not open the drawing: {e}")));
+			return 0;
+		}
+	};
+	let ctx_line = viewer_line(&shared.doc, &drawing, turn.current_page, turn.visible_region, &turn.selected_ids);
+	let file = shared.pdf.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+	let system = system_prompt(&file, drawing.page_count(), true) + &channel_note(turn.channel, turn.sweeps.is_some());
+	drop(drawing);
+	// TAKEOFF_BRIDGE_EXE: a built takeoff-desk to bridge through (tests, dev runs from another binary).
+	let exe = match std::env::var_os("TAKEOFF_BRIDGE_EXE").map(|p| Ok(PathBuf::from(p))).unwrap_or_else(std::env::current_exe) {
+		Ok(e) => e,
+		Err(e) => {
+			let _ = tx.send(AgentEvent::Error(format!("could not find Takeoff Desk's own executable for the tool bridge: {e}")));
+			return 0;
+		}
+	};
+	let _ = std::fs::create_dir_all(&turn.workdir);
+	session.lock().messages.push(Msg::User { text: user_text.clone(), context: Some(ctx_line.clone()) });
+	let pending = Arc::new(Mutex::new(String::new()));
+	let dialect_model = match (turn.model.as_str(), turn.channel) {
+		("", Channel::ClaudeCode) => "claude".to_string(),
+		("", Channel::Codex) => "gpt".to_string(),
+		(m, _) => m.to_string(),
+	};
+	shared.begin(Link { tx: tx.clone(), session: session.clone(), cancel: cancel.clone(), current_page: turn.current_page, model: dialect_model, sweeps: turn.sweeps.clone(), pending: pending.clone() });
+	let bridge = Bridge { exe, addr: addr.to_string(), token: shared.token.clone() };
+	let mut resume = session.lock().external.clone().filter(|e| e.channel == turn.channel.key()).map(|e| e.id);
+	let mut steps = 0;
+	for attempt in 0..2 {
+		let preamble = if resume.is_none() { history_preamble(&session.lock()) } else { String::new() };
+		let prompt = match (turn.channel, resume.is_some()) {
+			(Channel::Codex, false) => format!("<takeoff_desk_instructions>\n{system}\n</takeoff_desk_instructions>\n\n{preamble}{ctx_line}\n\n{user_text}"),
+			_ => format!("{preamble}{ctx_line}\n\n{user_text}"),
+		};
+		let out = run_cli(&turn, &bridge, &system, resume.as_deref(), &prompt, session, &pending, tx, cancel);
+		steps += out.steps;
+		if attempt == 0 && resume.is_some() && out.failed && !out.produced && !cancel.load(Ordering::Relaxed) {
+			// The CLI lost the old conversation (cleared, other machine…): start
+			// a new one carrying the chat so far.
+			session.lock().external = None;
+			resume = None;
+			continue;
+		}
+		if let Some(e) = out.error {
+			let _ = tx.send(AgentEvent::Error(e));
+		}
+		break;
+	}
+	let rest = std::mem::take(&mut *pending.lock());
+	if !rest.trim().is_empty() {
+		session.lock().messages.push(Msg::Assistant { text: rest, reasoning: String::new(), tool_calls: vec![] });
+	}
+	steps
+}
+
+struct Bridge {
+	exe: PathBuf,
+	addr: String,
+	token: String,
+}
+
+/// A TOML basic string (JSON's escapes are valid TOML).
+fn toml_str(s: &str) -> String {
+	Value::String(s.to_string()).to_string()
+}
+
+fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option<&str>) -> Command {
+	let mut c = command(&turn.exe);
+	c.current_dir(&turn.workdir);
+	match turn.channel {
+		Channel::ClaudeCode => {
+			let mcp = json!({ "mcpServers": { SERVER: {
+				"type": "stdio",
+				"command": bridge.exe,
+				"args": [BRIDGE_ARG, bridge.addr],
+				"env": { TOKEN_ENV: bridge.token },
+			}}});
+			c.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--input-format", "text"]);
+			c.args(["--system-prompt", system]);
+			// No built-in tools (shell, files, web): only the drawing tools, pre-approved.
+			c.args(["--tools", ""]);
+			c.args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"]);
+			c.args(["--allowedTools", &format!("mcp__{SERVER}")]);
+			c.args(["--permission-mode", "dontAsk"]);
+			if !turn.model.is_empty() {
+				c.args(["--model", &turn.model]);
+			}
+			if let Some(id) = resume {
+				c.args(["--resume", id]);
+			}
+			c.env("MCP_TOOL_TIMEOUT", (TOOL_TIMEOUT_SECS * 1000).to_string());
+			c.env("MCP_TIMEOUT", "30000");
+		}
+		Channel::Codex => {
+			c.arg("exec");
+			c.args(["--json", "--skip-git-repo-check", "-s", "read-only"]);
+			c.arg("-C").arg(&turn.workdir);
+			c.args(["-c", "approval_policy=\"never\""]);
+			let key = format!("mcp_servers.{SERVER}");
+			c.args(["-c", &format!("{key}.command={}", toml_str(&bridge.exe.to_string_lossy()))]);
+			c.args(["-c", &format!("{key}.args=[{}, {}]", toml_str(BRIDGE_ARG), toml_str(&bridge.addr))]);
+			c.args(["-c", &format!("{key}.env={{ {TOKEN_ENV} = {} }}", toml_str(&bridge.token))]);
+			c.args(["-c", &format!("{key}.tool_timeout_sec={TOOL_TIMEOUT_SECS}")]);
+			c.args(["-c", &format!("{key}.startup_timeout_sec=30")]);
+			if !turn.model.is_empty() {
+				c.args(["-m", &turn.model]);
+			}
+			if let Some(id) = resume {
+				c.args(["resume", id]);
+			}
+			c.arg("-");
+		}
+	}
+	c
+}
+
+#[derive(Default)]
+struct CliOutcome {
+	steps: u32,
+	/// Any text or tool call came back.
+	produced: bool,
+	failed: bool,
+	error: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cli(
+	turn: &ChannelTurn,
+	bridge: &Bridge,
+	system: &str,
+	resume: Option<&str>,
+	prompt: &str,
+	session: &Arc<Mutex<ChatSession>>,
+	pending: &Arc<Mutex<String>>,
+	tx: &Sender<AgentEvent>,
+	cancel: &Arc<AtomicBool>,
+) -> CliOutcome {
+	let mut out = CliOutcome::default();
+	let mut cmd = cli_command(turn, bridge, system, resume);
+	let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+		Ok(c) => c,
+		Err(e) => {
+			out.failed = true;
+			out.error = Some(format!("could not start {}: {e}", turn.channel.name()));
+			return out;
+		}
+	};
+	if let Some(mut si) = child.stdin.take() {
+		let _ = si.write_all(prompt.as_bytes());
+	}
+	let stderr = Arc::new(Mutex::new(String::new()));
+	if let Some(mut e) = child.stderr.take() {
+		let buf = stderr.clone();
+		std::thread::spawn(move || {
+			let mut s = String::new();
+			let _ = e.read_to_string(&mut s);
+			*buf.lock() = s;
+		});
+	}
+	let stdout = child.stdout.take();
+	let child = Arc::new(Mutex::new(child));
+	let finished = Arc::new(AtomicBool::new(false));
+	{
+		// Stop: kill the CLI (its bridge exits with it); the session stays as it was.
+		let (child, finished, cancel) = (child.clone(), finished.clone(), cancel.clone());
+		std::thread::spawn(move || {
+			while !finished.load(Ordering::Relaxed) {
+				if cancel.load(Ordering::Relaxed) {
+					let _ = child.lock().kill();
+					break;
+				}
+				std::thread::sleep(Duration::from_millis(150));
+			}
+		});
+	}
+	let mut parser: Box<dyn Parser> = match turn.channel {
+		Channel::ClaudeCode => Box::new(ClaudeParser::default()),
+		Channel::Codex => Box::new(CodexParser::default()),
+	};
+	let mut done = false;
+	let mut foreign = Vec::new();
+	if let Some(so) = stdout {
+		for line in BufReader::new(so).lines() {
+			let Ok(line) = line else { break };
+			for ev in parser.line(&line) {
+				match ev {
+					Ev::Text(t) => {
+						out.produced = true;
+						pending.lock().push_str(&t);
+						let _ = tx.send(AgentEvent::TextDelta(t));
+					}
+					Ev::Reasoning(t) => {
+						let _ = tx.send(AgentEvent::ReasoningDelta(t));
+					}
+					Ev::Thread(id) => session.lock().external = Some(ExternalThread { channel: turn.channel.key().into(), id }),
+					Ev::OwnToolUse => {
+						out.produced = true;
+						out.steps += 1;
+					}
+					Ev::ToolStarted { id, name, args } => {
+						out.produced = true;
+						out.steps += 1;
+						foreign.push((id.clone(), name.clone(), args.clone()));
+						let _ = tx.send(AgentEvent::ToolStarted { call_id: id, name, args });
+					}
+					Ev::ToolFinished { id, ok, summary } => {
+						let Some(pos) = foreign.iter().position(|f| f.0 == id) else { continue };
+						let (id, name, args) = foreign.remove(pos);
+						let text_before = std::mem::take(&mut *pending.lock());
+						let mut s = session.lock();
+						s.messages.push(Msg::Assistant { text: text_before, reasoning: String::new(), tool_calls: vec![ToolCall { id: id.clone(), name: name.clone(), arguments: args.to_string() }] });
+						s.messages.push(Msg::Tool { call_id: id.clone(), name: name.clone(), text: summary.clone(), ok, images: vec![], image_captions: vec![], thumb: None });
+						drop(s);
+						let _ = tx.send(AgentEvent::ToolFinished { call_id: id, name, ok, summary, image: None });
+					}
+					Ev::Usage { prompt, completion } => {
+						let mut s = session.lock();
+						s.prompt_tokens = prompt.max(s.prompt_tokens);
+						s.completion_tokens += completion;
+						drop(s);
+						let _ = tx.send(AgentEvent::Usage { prompt_tokens: prompt, completion_tokens: completion });
+					}
+					Ev::Error(e) => {
+						out.failed = true;
+						out.error = Some(e);
+					}
+					Ev::Done => done = true,
+				}
+			}
+		}
+	}
+	finished.store(true, Ordering::Relaxed);
+	let status = child.lock().wait();
+	if cancel.load(Ordering::Relaxed) {
+		out.error = None;
+		return out;
+	}
+	if !done && out.error.is_none() {
+		out.failed = true;
+		let err = tail(&stderr.lock(), 4);
+		let code = status.ok().and_then(|s| s.code()).map(|c| format!(" (exit code {c})")).unwrap_or_default();
+		out.error = Some(if err.is_empty() { format!("{} stopped without finishing{code}", turn.channel.name()) } else { format!("{}: {err}", turn.channel.name()) });
+	}
+	out
+}
+
+// ── Stream parsers ──────────────────────────────────────────────────────
+
+/// What a CLI's JSON stream says, reduced to what the Bench shows.
+#[derive(Debug, Clone, PartialEq)]
+enum Ev {
+	Text(String),
+	Reasoning(String),
+	/// The CLI's conversation id, to resume next turn.
+	Thread(String),
+	/// A call to our own tools (the host reports those itself).
+	OwnToolUse,
+	/// Any other tool the CLI ran.
+	ToolStarted { id: String, name: String, args: Value },
+	ToolFinished { id: String, ok: bool, summary: String },
+	Usage { prompt: u64, completion: u64 },
+	Error(String),
+	Done,
+}
+
+trait Parser: Send {
+	fn line(&mut self, line: &str) -> Vec<Ev>;
+}
+
+fn u(v: &Value, ptr: &str) -> u64 {
+	v.pointer(ptr).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn s<'a>(v: &'a Value, ptr: &str) -> &'a str {
+	v.pointer(ptr).and_then(Value::as_str).unwrap_or("")
+}
+
+/// `claude -p --output-format stream-json --verbose --include-partial-messages`.
+#[derive(Default)]
+struct ClaudeParser {
+	text_seen: bool,
+}
+
+impl Parser for ClaudeParser {
+	fn line(&mut self, line: &str) -> Vec<Ev> {
+		let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
+		let mut out = Vec::new();
+		match s(&v, "/type") {
+			"system" if s(&v, "/subtype") == "init" => {
+				if let Some(id) = v.get("session_id").and_then(Value::as_str) {
+					out.push(Ev::Thread(id.to_string()));
+				}
+				let ours = v.get("mcp_servers").and_then(Value::as_array).and_then(|a| a.iter().find(|m| s(m, "/name") == SERVER).cloned());
+				if let Some(m) = ours.filter(|m| s(m, "/status") == "failed") {
+					out.push(Ev::Error(format!("The drawing tools did not connect to Claude Code (MCP status: {}).", s(&m, "/status"))));
+				}
+			}
+			"stream_event" => {
+				let e = &v["event"];
+				match s(e, "/type") {
+					"content_block_start" if s(e, "/content_block/type") == "text" && self.text_seen => out.push(Ev::Text("\n\n".into())),
+					"content_block_delta" => match s(e, "/delta/type") {
+						"text_delta" => {
+							let t = s(e, "/delta/text");
+							if !t.is_empty() {
+								self.text_seen = true;
+								out.push(Ev::Text(t.to_string()));
+							}
+						}
+						"thinking_delta" => out.push(Ev::Reasoning(s(e, "/delta/thinking").to_string())),
+						_ => {}
+					},
+					_ => {}
+				}
+			}
+			"assistant" => {
+				for b in v.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
+					if s(b, "/type") != "tool_use" {
+						continue;
+					}
+					let name = s(b, "/name");
+					if name.starts_with(&format!("mcp__{SERVER}__")) {
+						out.push(Ev::OwnToolUse);
+					} else {
+						out.push(Ev::ToolStarted { id: s(b, "/id").into(), name: name.into(), args: b.get("input").cloned().unwrap_or(Value::Null) });
+					}
+				}
+			}
+			"user" => {
+				for b in v.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
+					if s(b, "/type") != "tool_result" {
+						continue;
+					}
+					let summary = match b.get("content") {
+						Some(Value::String(t)) => t.clone(),
+						Some(Value::Array(a)) => a.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join(" "),
+						_ => String::new(),
+					};
+					let ok = !b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+					out.push(Ev::ToolFinished { id: s(b, "/tool_use_id").into(), ok, summary: summary.lines().next().unwrap_or("").chars().take(300).collect() });
+				}
+			}
+			"result" => {
+				let usage = &v["usage"];
+				let prompt = u(usage, "/input_tokens") + u(usage, "/cache_read_input_tokens") + u(usage, "/cache_creation_input_tokens");
+				out.push(Ev::Usage { prompt, completion: u(usage, "/output_tokens") });
+				if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) || s(&v, "/subtype").starts_with("error") {
+					let msg = v.get("result").and_then(Value::as_str).filter(|r| !r.is_empty()).map(str::to_string).unwrap_or_else(|| {
+						let errs: Vec<&str> = v.get("errors").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+						if errs.is_empty() { s(&v, "/subtype").replace('_', " ") } else { errs.join("; ") }
+					});
+					out.push(Ev::Error(format!("Claude Code: {msg}")));
+				}
+				out.push(Ev::Done);
+			}
+			_ => {}
+		}
+		out
+	}
+}
+
+/// `codex exec --json` (JSONL thread events).
+#[derive(Default)]
+struct CodexParser {
+	/// Text already shown per item id (items can stream through item.updated).
+	shown: std::collections::HashMap<String, usize>,
+	text_seen: bool,
+	last_error: Option<String>,
+	done: bool,
+}
+
+impl CodexParser {
+	fn item_text(&mut self, item: &Value) -> Option<String> {
+		let id = s(item, "/id").to_string();
+		let text = s(item, "/text");
+		let seen = self.shown.entry(id).or_insert(0);
+		if text.len() <= *seen || !text.is_char_boundary(*seen) {
+			return None;
+		}
+		let new = text[*seen..].to_string();
+		let first = *seen == 0;
+		*seen = text.len();
+		Some(if first && self.text_seen && s(item, "/type") == "agent_message" { format!("\n\n{new}") } else { new })
+	}
+}
+
+impl Parser for CodexParser {
+	fn line(&mut self, line: &str) -> Vec<Ev> {
+		let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
+		let mut out = Vec::new();
+		let item = &v["item"];
+		match s(&v, "/type") {
+			"thread.started" => {
+				if let Some(id) = v.get("thread_id").and_then(Value::as_str) {
+					out.push(Ev::Thread(id.to_string()));
+				}
+			}
+			t @ ("item.started" | "item.updated" | "item.completed") => match s(item, "/type") {
+				"agent_message" => {
+					if let Some(text) = self.item_text(item) {
+						self.text_seen = true;
+						out.push(Ev::Text(text));
+					}
+				}
+				"reasoning" => {
+					if let Some(text) = self.item_text(item) {
+						out.push(Ev::Reasoning(text));
+					}
+				}
+				"mcp_tool_call" if s(item, "/server") == SERVER => {
+					if t == "item.started" {
+						out.push(Ev::OwnToolUse);
+					}
+				}
+				kind @ ("command_execution" | "mcp_tool_call" | "web_search" | "file_change") => {
+					let id = s(item, "/id").to_string();
+					if t == "item.started" {
+						let (name, args) = match kind {
+							"command_execution" => ("shell".to_string(), json!({ "command": s(item, "/command") })),
+							"mcp_tool_call" => (format!("{}.{}", s(item, "/server"), s(item, "/tool")), item.get("arguments").cloned().unwrap_or(Value::Null)),
+							other => (other.to_string(), Value::Null),
+						};
+						out.push(Ev::ToolStarted { id, name, args });
+					} else if t == "item.completed" {
+						let status = s(item, "/status");
+						let ok = status != "failed" && item.get("exit_code").and_then(Value::as_i64).is_none_or(|c| c == 0);
+						let summary = s(item, "/aggregated_output").lines().next().unwrap_or(status).chars().take(300).collect();
+						out.push(Ev::ToolFinished { id, ok, summary });
+					}
+				}
+				_ => {}
+			},
+			"turn.completed" => {
+				self.done = true;
+				out.push(Ev::Usage { prompt: u(&v, "/usage/input_tokens"), completion: u(&v, "/usage/output_tokens") });
+				out.push(Ev::Done);
+			}
+			"turn.failed" => {
+				self.done = true;
+				let msg = Some(s(&v, "/error/message")).filter(|m| !m.is_empty()).map(str::to_string).or(self.last_error.take()).unwrap_or_else(|| "the turn failed".into());
+				out.push(Ev::Error(format!("Codex: {msg}")));
+				out.push(Ev::Done);
+			}
+			"error" => {
+				// Often a retry notice; reported only if the turn never completes.
+				let msg = s(&v, "/message").to_string();
+				self.last_error = Some(msg.clone());
+				if !self.done && msg.to_lowercase().contains("not logged in") {
+					out.push(Ev::Error(format!("Codex: {msg}")));
+				}
+			}
+			_ => {}
+		}
+		out
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn feed(p: &mut dyn Parser, lines: &[&str]) -> Vec<Ev> {
+		lines.iter().flat_map(|l| p.line(l)).collect()
+	}
+
+	#[test]
+	fn claude_stream() {
+		let mut p = ClaudeParser::default();
+		let evs = feed(
+			&mut p,
+			&[
+				r#"{"type":"system","subtype":"init","session_id":"abc-123","mcp_servers":[{"name":"takeoff","status":"connected"}]}"#,
+				r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}"#,
+				r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Look first."}}}"#,
+				r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#,
+				r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Rendering the page."}}}"#,
+				r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Rendering the page."},{"type":"tool_use","id":"t1","name":"mcp__takeoff__view","input":{"page":1}}]}}"#,
+				r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"v1 · page 1"}]}]}}"#,
+				r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#,
+				r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"12 receptacles."}}}"#,
+				r#"{"type":"result","subtype":"success","is_error":false,"result":"12 receptacles.","session_id":"abc-123","usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":90,"output_tokens":40}}"#,
+			],
+		);
+		assert_eq!(
+			evs,
+			vec![
+				Ev::Thread("abc-123".into()),
+				Ev::Reasoning("Look first.".into()),
+				Ev::Text("Rendering the page.".into()),
+				Ev::OwnToolUse,
+				Ev::ToolFinished { id: "t1".into(), ok: true, summary: "v1 · page 1".into() },
+				Ev::Text("\n\n".into()),
+				Ev::Text("12 receptacles.".into()),
+				Ev::Usage { prompt: 1000, completion: 40 },
+				Ev::Done,
+			]
+		);
+	}
+
+	#[test]
+	fn claude_errors() {
+		let mut p = ClaudeParser::default();
+		let evs = feed(&mut p, &[r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","usage":{}}"#]);
+		assert!(evs.contains(&Ev::Error("Claude Code: Not logged in · Please run /login".into())));
+		assert_eq!(evs.last(), Some(&Ev::Done));
+		let evs = feed(&mut p, &[r#"{"type":"system","subtype":"init","session_id":"x","mcp_servers":[{"name":"takeoff","status":"failed"}]}"#]);
+		assert!(matches!(evs[1], Ev::Error(_)));
+	}
+
+	#[test]
+	fn codex_stream() {
+		let mut p = CodexParser::default();
+		let evs = feed(
+			&mut p,
+			&[
+				r#"{"type":"thread.started","thread_id":"0199-thread"}"#,
+				r#"{"type":"turn.started"}"#,
+				r#"{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Plan the sweep."}}"#,
+				r#"{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Looking at page 1."}}"#,
+				r#"{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"takeoff","tool":"view","arguments":{"page":1},"status":"in_progress"}}"#,
+				r#"{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"takeoff","tool":"view","status":"completed"}}"#,
+				r#"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"ls","status":"in_progress"}}"#,
+				r#"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}"#,
+				r#"{"type":"item.updated","item":{"id":"item_4","type":"agent_message","text":"Found "}}"#,
+				r#"{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Found 12."}}"#,
+				r#"{"type":"turn.completed","usage":{"input_tokens":2400,"cached_input_tokens":2000,"output_tokens":75}}"#,
+			],
+		);
+		assert_eq!(
+			evs,
+			vec![
+				Ev::Thread("0199-thread".into()),
+				Ev::Reasoning("Plan the sweep.".into()),
+				Ev::Text("Looking at page 1.".into()),
+				Ev::OwnToolUse,
+				Ev::ToolStarted { id: "item_3".into(), name: "shell".into(), args: json!({"command": "ls"}) },
+				Ev::ToolFinished { id: "item_3".into(), ok: true, summary: "completed".into() },
+				Ev::Text("\n\nFound ".into()),
+				Ev::Text("12.".into()),
+				Ev::Usage { prompt: 2400, completion: 75 },
+				Ev::Done,
+			]
+		);
+	}
+
+	#[test]
+	fn codex_failure_keeps_the_reason() {
+		let mut p = CodexParser::default();
+		let evs = feed(&mut p, &[r#"{"type":"error","message":"stream disconnected"}"#, r#"{"type":"turn.failed","error":{"message":"The model `gpt-x` does not exist or you do not have access to it."}}"#]);
+		assert_eq!(evs, vec![Ev::Error("Codex: The model `gpt-x` does not exist or you do not have access to it.".into()), Ev::Done]);
+	}
+
+	#[test]
+	fn codex_models_keep_listed_vision_models_in_priority_order() {
+		let v = json!({"models": [
+			{"slug": "b", "display_name": "B", "visibility": "list", "priority": 2, "input_modalities": ["text", "image"]},
+			{"slug": "hidden", "visibility": "hide", "priority": 0},
+			{"slug": "text-only", "visibility": "list", "priority": 1, "input_modalities": ["text"]},
+			{"slug": "a", "display_name": "A", "description": "Top", "visibility": "list", "priority": 1, "input_modalities": ["text", "image"]},
+		]});
+		let ids: Vec<String> = parse_codex_models(&v).into_iter().map(|m| m.id).collect();
+		assert_eq!(ids, vec!["", "a", "b"]);
+	}
+
+	#[test]
+	fn preamble_carries_earlier_turns_but_not_the_new_message() {
+		let mut s = ChatSession::new();
+		s.messages.push(Msg::User { text: "Count outlets".into(), context: None });
+		s.messages.push(Msg::Assistant { text: "Found 4.".into(), reasoning: String::new(), tool_calls: vec![] });
+		s.messages.push(Msg::User { text: "Now switches".into(), context: None });
+		let p = history_preamble(&s);
+		assert!(p.contains("Estimator: Count outlets") && p.contains("Bench: Found 4."));
+		assert!(!p.contains("Now switches"));
+		assert_eq!(history_preamble(&ChatSession::new()), "");
+	}
+
+	#[test]
+	fn toml_strings_escape_windows_paths() {
+		assert_eq!(toml_str(r"C:\Program Files\Takeoff Desk\takeoff-desk.exe"), r#""C:\\Program Files\\Takeoff Desk\\takeoff-desk.exe""#);
+	}
+}

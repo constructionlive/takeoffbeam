@@ -4232,6 +4232,7 @@ version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
+ "dirs",
  "image",
  "parking_lot",
  "pdfium-render",

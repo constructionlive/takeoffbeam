@@ -77,6 +77,18 @@ pub struct ChatSession {
 	pub prompt_tokens: u64,
 	#[serde(default)]
 	pub completion_tokens: u64,
+	/// The Claude Code / Codex conversation this chat continues, when it runs
+	/// through a subscription channel.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub external: Option<ExternalThread>,
+}
+
+/// A conversation held by an outside agent CLI, resumed by id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalThread {
+	/// [`crate::channel::Channel::key`]: "claude" or "codex".
+	pub channel: String,
+	pub id: String,
 }
 
 impl ChatSession {

@@ -6,9 +6,13 @@
 //! - [`tools`] is the tool registry on its own (used by the MCP server).
 //! - Any OpenAI-compatible endpoint works: llama-server, the construction.live
 //!   desktop gateway, or a hosted API.
+//! - [`channel`] runs the turn on the person's own Claude Code or Codex
+//!   subscription instead, with the same tools served to it over MCP.
 
 mod agent;
+pub mod channel;
 pub mod llm;
+pub mod mcp;
 pub mod prompt;
 pub mod session;
 pub mod tools;
@@ -20,7 +24,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 pub use agent::{start_turn, MAX_STEPS};
-pub use session::{ChatSession, Role, TranscriptEntry};
+pub use session::{ChatSession, ExternalThread, Role, TranscriptEntry};
 
 /// Which model to talk to.
 #[derive(Debug, Clone, PartialEq)]
