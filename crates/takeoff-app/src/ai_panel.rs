@@ -597,7 +597,9 @@ impl AiPanel {
 		let transcript = session.lock().transcript();
 		let avail = ui.available_height();
 		let composer_h = 118.0;
-		ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).max_height((avail - composer_h).max(80.0)).show(ui, |ui| {
+		// Both directions: text still wraps to the panel width, but anything that
+		// can't (a wide table line, an image) scrolls instead of being cut off.
+		ScrollArea::both().stick_to_bottom(true).auto_shrink(false).max_height((avail - composer_h).max(80.0)).show(ui, |ui| {
 			if transcript.is_empty() && self.turn.is_none() && self.live.text.is_empty() {
 				self.welcome(ui, doc, settings, p);
 			}
@@ -1508,7 +1510,10 @@ fn user_bubble(ui: &mut egui::Ui, p: &Palette, text: &str) {
 		let max = ui.available_width() * 0.85;
 		egui::Frame::new().fill(if p.dark { Color32::from_rgb(0x2A, 0x1E, 0x1A) } else { Color32::from_rgb(0xFD, 0xEE, 0xE7) }).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
 			ui.set_max_width(max);
-			ui.label(RichText::new(text).size(13.0).color(p.text));
+			// Explicit wrap: labels in a right-to-left (horizontal) layout extend by
+			// default, which overflows the panel's left edge and drags the rest of the
+			// transcript with it.
+			ui.add(egui::Label::new(RichText::new(text).size(13.0).color(p.text)).wrap());
 		});
 	});
 	ui.add_space(4.0);
@@ -1524,7 +1529,8 @@ pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
 			continue;
 		}
 		if in_code || t.trim_start().starts_with('|') {
-			ui.label(RichText::new(t).monospace().size(11.5).color(p.text));
+			// Unwrapped so table columns stay aligned; the transcript scrolls sideways.
+			ui.add(egui::Label::new(RichText::new(t).monospace().size(11.5).color(p.text)).extend());
 			continue;
 		}
 		if t.trim().is_empty() {
@@ -1662,4 +1668,29 @@ fn action_row(ui: &mut egui::Ui, p: &Palette, icon: &str, title: &str, sub: &str
 	painter.text(egui::pos2(x, rect.top() + 23.0), egui::Align2::LEFT_TOP, sub, egui::FontId::proportional(11.5), p.text2);
 	painter.text(rect.right_center() - egui::vec2(16.0, 0.0), egui::Align2::CENTER_CENTER, i::CHEVRON_RIGHT, theme::icon_font(13.0), p.muted);
 	r
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A long user message must wrap inside the panel, and must not shift the
+	/// transcript that follows it off the panel's left edge.
+	#[test]
+	fn long_user_bubble_stays_inside_the_panel() {
+		let ctx = egui::Context::default();
+		let p = theme::palette(&ctx);
+		let long = "can check the scale on other drawings and see how that converts to the pixel measurement on this one, then use it here ".repeat(3);
+		let panel = egui::Rect::from_min_size(egui::pos2(100.0, 0.0), egui::vec2(300.0, 800.0));
+		let mut after = egui::Rect::NOTHING;
+		let mut used = egui::Rect::NOTHING;
+		let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 800.0))), ..Default::default() }, |ui| {
+			let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(panel).layout(egui::Layout::top_down(egui::Align::Min)));
+			user_bubble(&mut ui, &p, &long);
+			after = ui.label("next line").rect;
+			used = ui.min_rect();
+		});
+		assert!(used.left() >= panel.left() - 0.5 && used.right() <= panel.right() + 0.5, "bubble overflowed: {used:?} vs {panel:?}");
+		assert!((after.left() - panel.left()).abs() < 0.5, "following text shifted to x={}", after.left());
+	}
 }

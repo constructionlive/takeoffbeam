@@ -1532,7 +1532,7 @@ impl TakeoffApp {
 				if !rel.date.is_empty() {
 					ui.label(RichText::new(&rel.date).color(p.muted).size(12.0));
 				}
-				egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| crate::ai_panel::markdown(ui, p, &rel.notes));
+				egui::ScrollArea::both().max_height(360.0).show(ui, |ui| crate::ai_panel::markdown(ui, p, &rel.notes));
 			});
 			self.notes_open = open;
 		}
