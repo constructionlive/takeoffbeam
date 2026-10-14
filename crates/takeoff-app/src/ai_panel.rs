@@ -148,6 +148,11 @@ impl AiPanel {
 	}
 
 	#[doc(hidden)]
+	pub fn debug_session(&mut self, path: &PathBuf) -> Arc<Mutex<ChatSession>> {
+		self.session(path)
+	}
+
+	#[doc(hidden)]
 	pub fn debug_open(&mut self, tab: usize) {
 		self.models_open = true;
 		self.models_tab = tab;
@@ -1073,8 +1078,24 @@ pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
 					if seg.is_empty() {
 						continue;
 					}
-					let rt = if j % 2 == 1 { RichText::new(seg).monospace().size(12.0).color(p.accent) } else { RichText::new(seg).size(size).color(p.text) };
-					ui.label(if bold && j % 2 == 0 { rt.font(theme::semibold(size)) } else { rt });
+					if j % 2 == 1 {
+						ui.label(RichText::new(seg).monospace().size(12.0).color(p.accent));
+						continue;
+					}
+					// *italic* spans (single asterisks; ** is handled above).
+					for (m, it) in seg.split('*').enumerate() {
+						if it.is_empty() {
+							continue;
+						}
+						let mut rt = RichText::new(it).size(size).color(p.text);
+						if bold {
+							rt = rt.font(theme::semibold(size));
+						}
+						if m % 2 == 1 {
+							rt = rt.italics();
+						}
+						ui.label(rt);
+					}
 				}
 			}
 		});

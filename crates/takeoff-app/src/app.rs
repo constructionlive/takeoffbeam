@@ -1552,6 +1552,16 @@ impl TakeoffApp {
 		self.left.tab = tab;
 	}
 	#[doc(hidden)]
+	pub fn debug_session(&mut self, path: &std::path::PathBuf) -> std::sync::Arc<parking_lot::Mutex<takeoff_agent::ChatSession>> {
+		self.ai.debug_session(path)
+	}
+
+	#[doc(hidden)]
+	pub fn debug_close_models(&mut self) {
+		self.ai.models_open = false;
+	}
+
+	#[doc(hidden)]
 	pub fn debug_open_models(&mut self, tab: usize) {
 		self.ai.debug_open(tab);
 	}
