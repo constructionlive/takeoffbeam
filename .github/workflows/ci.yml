@@ -7,9 +7,13 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04]
+        os: [macos-14, ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

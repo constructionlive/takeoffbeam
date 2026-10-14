@@ -54,3 +54,16 @@ fn rough_shape(name: &str, weights: u64, projector: u64) -> ModelShape {
 	let per_token = (128.0 * 1024.0 * (gb / 10.0)).clamp(32.0 * 1024.0, 256.0 * 1024.0) as u64;
 	ModelShape::rough(name, weights, projector, per_token, 131_072)
 }
+
+/// A command that never pops a console window on Windows (GUI app children).
+pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+	#[allow(unused_mut)]
+	let mut cmd = std::process::Command::new(program);
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+		cmd.creation_flags(CREATE_NO_WINDOW);
+	}
+	cmd
+}

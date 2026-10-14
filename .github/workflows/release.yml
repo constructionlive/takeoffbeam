@@ -1,0 +1,32 @@
+name: Release (Windows installer)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: NSIS
+        run: choco install nsis -y
+      - name: Build installer
+        env:
+          TARGET: x86_64-pc-windows-msvc
+          MAKENSIS: "C:/Program Files (x86)/NSIS/makensis.exe"
+        run: scripts/package-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: takeoff-desk-windows
+          path: dist/*-setup.exe
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*-setup.exe

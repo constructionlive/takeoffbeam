@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -86,7 +86,7 @@ impl LlamaServer {
 	pub fn start_with(model: &InstalledModel, ctx_tokens: u32, cache: CacheType, opts: &ServerOptions) -> Result<Self, String> {
 		let bin = find_llama_server().ok_or("llama-server was not found. Install llama.cpp (brew install llama.cpp) or set TAKEOFF_LLAMA_SERVER.")?;
 		let port = free_port()?;
-		let mut cmd = Command::new(&bin);
+		let mut cmd = crate::quiet_command(&bin);
 		cmd.arg("-m").arg(&model.model_path);
 		if let Some(mm) = &model.mmproj_path {
 			cmd.arg("--mmproj").arg(mm);

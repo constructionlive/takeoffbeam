@@ -72,7 +72,7 @@ pub fn parse_list_devices(output: &str) -> Vec<Device> {
 /// real model budget (Metal working-set cap on Apple silicon, VRAM on CUDA/Vulkan),
 /// so this beats the built-in rule of thumb whenever llama-server is available.
 pub fn memory_info_from_llama(llama_server: &std::path::Path) -> Option<(MemoryInfo, Vec<Device>)> {
-	let out = std::process::Command::new(llama_server).arg("--list-devices").output().ok()?;
+	let out = crate::quiet_command(llama_server).arg("--list-devices").output().ok()?;
 	let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 	let devices = parse_list_devices(&text);
 	let gpu = devices.iter().filter(|d| d.name != "BLAS" && d.name != "CPU" && d.total > 0).max_by_key(|d| d.total)?;

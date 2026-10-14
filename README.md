@@ -36,7 +36,8 @@ a local model on your machine, or on cloud models if you sign in to
 
 ## Get it
 
-- **macOS (Apple silicon):** grab the `.dmg` from Releases.
+- **macOS (Apple silicon):** the `.dmg` from Releases, signed and notarized by Neuratwin Inc.
+- **Windows 10/11 (x64):** `Takeoff-Desk-<version>-x64-setup.exe` from Releases.
 - **From source:** `scripts/fetch-pdfium.sh && cargo run --release -p takeoff-app`.
 
 See the [docs](docs/README.md):

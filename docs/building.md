@@ -21,7 +21,7 @@ cargo run -p takeoff-app           # the app (debug)
 
 ```sh
 scripts/package-macos.sh                                          # ad-hoc signed, dist/*.dmg
-SIGN_IDENTITY="Developer ID Application: …" scripts/package-macos.sh
+SIGN_IDENTITY="Developer ID Application: Neuratwin Inc. (8T3B74J76Z)" scripts/package-macos.sh
 NOTARIZE=1 APPLE_ID=… APPLE_TEAM_ID=… APPLE_APP_SPECIFIC_PASSWORD=… SIGN_IDENTITY=… scripts/package-macos.sh
 ```
 
@@ -34,7 +34,29 @@ The bundle (about 46 MB as a dmg) contains:
 
 Every Mach-O is signed inside-out with the hardened runtime.
 
-## Windows / Linux
+## Windows installer
 
-The code is portable (egui/wgpu, pdfium, llama.cpp). `scripts/fetch-pdfium.sh` knows the Linux
-binaries. Installers for these platforms are on the roadmap.
+```sh
+brew install mingw-w64 makensis      # once (macOS); or run on Windows / in CI
+scripts/package-windows.sh           # → dist/Takeoff-Desk-<version>-x64-setup.exe
+```
+
+The script cross-compiles with mingw-w64 (with the icon and version info embedded) and fetches:
+- `pdfium.dll`;
+- llama.cpp's **Vulkan** build, which runs on NVIDIA, AMD and Intel GPUs and falls back to CPU;
+- Microsoft's Visual C++ runtime installer, which setup runs silently only if the runtime is
+  missing.
+
+The NSIS installer adds a Start-menu and desktop shortcut, an *Open with → Takeoff Desk* entry for
+PDFs, and an uninstaller in Add/Remove Programs.
+
+`.github/workflows/release.yml` builds the same installer natively (MSVC) on a Windows runner for
+every `v*` tag and attaches it to the GitHub release.
+
+The installer is not Authenticode-signed yet, so Windows SmartScreen shows "unknown publisher"
+until it has a code-signing certificate.
+
+## Linux
+
+The code is portable (egui/wgpu, pdfium, llama.cpp) and CI builds and tests it on Ubuntu.
+A packaged AppImage is on the roadmap.

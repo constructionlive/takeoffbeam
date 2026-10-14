@@ -9,7 +9,7 @@ models, and the `takeoff` command-line tool (`Takeoff Desk.app/Contents/Resource
 **From source** (any platform with Rust 1.85+):
 
 ```sh
-git clone https://github.com/construction-live/takeoff-desk && cd takeoff-desk
+git clone https://github.com/constructionlive/takeoffbeam && cd takeoffbeam
 scripts/fetch-pdfium.sh
 cargo run --release -p takeoff-app            # the app
 cargo install --path crates/takeoff-cli       # the `takeoff` CLI

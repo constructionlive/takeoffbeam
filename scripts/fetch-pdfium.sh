@@ -8,10 +8,15 @@ case "$(uname -s)-$(uname -m)" in
 	Darwin-x86_64) PKG=pdfium-mac-x64 ;;
 	Linux-x86_64) PKG=pdfium-linux-x64 ;;
 	Linux-aarch64) PKG=pdfium-linux-arm64 ;;
+	MINGW*|MSYS*|CYGWIN*) PKG=pdfium-win-x64 ;;
 	*) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 rm -rf "$ROOT/vendor/pdfium" && mkdir -p "$ROOT/vendor/pdfium"
 curl -sSLf "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${PKG}.tgz" \
 	| tar xz -C "$ROOT/vendor/pdfium"
+# Windows ships the DLL in bin/; the dev lookup expects lib/.
+if [ -f "$ROOT/vendor/pdfium/bin/pdfium.dll" ]; then
+	cp "$ROOT/vendor/pdfium/bin/pdfium.dll" "$ROOT/vendor/pdfium/lib/"
+fi
 echo "pdfium $(grep BUILD "$ROOT/vendor/pdfium/VERSION") -> vendor/pdfium/lib"

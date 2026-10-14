@@ -970,7 +970,7 @@ fn chat_path(pdf: &std::path::Path) -> PathBuf {
 }
 
 fn hostname() -> String {
-	std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "this computer".into())
+	takeoff_models::quiet_command("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "this computer".into())
 }
 
 fn eta(secs: f64) -> String {
