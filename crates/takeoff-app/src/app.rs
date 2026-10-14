@@ -539,8 +539,15 @@ impl TakeoffApp {
 			}
 		}
 		if self.settings.right_panel {
-			egui::Panel::right("right").resizable(true).default_size(340.0).size_range(260.0..=620.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(12, 6)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
-				ui.set_max_width(ui.available_width());
+			egui::Panel::right("right").resizable(true).default_size(340.0).size_range(260.0..=620.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(12, 6)).stroke(Stroke::new(1.0, p.border))).show(ui, |outer| {
+				// Lay the contents out in a child that can't grow the panel: if anything
+				// in it is too wide, egui would otherwise widen the panel past the window
+				// and the canvas would paint over its left edge. Overflow just clips.
+				let rect = outer.max_rect();
+				let mut inner = outer.new_child(egui::UiBuilder::new().max_rect(rect).layout(*outer.layout()));
+				inner.set_clip_rect(rect.intersect(outer.clip_rect()));
+				outer.advance_cursor_after_rect(rect);
+				let ui = &mut inner;
 				let sel = self.docs.get(active).map(|d| d.selection.len()).unwrap_or(0);
 				let props = if sel > 0 { format!("Properties ({sel})") } else { "Properties".into() };
 				widgets::tabs(ui, p, &[(i::SIGMA, "Takeoff"), (i::LIST, &props), (i::SPARKLES, "AI")], &mut self.right.tab);

@@ -714,7 +714,8 @@ impl AiPanel {
 		// Composer.
 		ui.add_space(4.0);
 		let sel = doc.selection.len();
-		ui.horizontal(|ui| {
+		// Wrapped, so a long sheet name can't push the panel wider than it is.
+		ui.horizontal_wrapped(|ui| {
 			chip(ui, p, &format!("{} {}", i::FILE_TEXT, doc.page_label(doc.page)));
 			if sel > 0 {
 				chip(ui, p, &format!("{} {sel} selected", i::MOUSE_POINTER_2));
@@ -1497,7 +1498,7 @@ fn tool_title(name: &str) -> String {
 
 fn chip(ui: &mut egui::Ui, p: &Palette, text: &str) {
 	egui::Frame::new().fill(p.hover).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
-		ui.label(RichText::new(text).size(11.5).color(p.text2));
+		ui.add(egui::Label::new(RichText::new(text).size(11.5).color(p.text2)).truncate());
 	});
 }
 
