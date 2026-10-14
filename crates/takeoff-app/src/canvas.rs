@@ -355,7 +355,7 @@ impl Canvas {
 		}
 
 		// Measurements.
-		for m in data.measurements.iter().filter(|m| m.page == page) {
+		for m in data.measurements.iter().filter(|m| m.page == page && !m.id.starts_with("probe_")) {
 			let cat = m.category_id.as_deref().and_then(|c| cats.get(c));
 			if cat.is_some_and(|c| c.hidden) {
 				continue;

@@ -1,0 +1,155 @@
+//! JSON schemas for every tool (OpenAI `tools` format / MCP `inputSchema`).
+
+use serde_json::{json, Value};
+
+use super::ToolDef;
+
+const BOX: &str = "4 numbers exactly as you read them off that view's image, in the convention its caption states (never page fractions, never converted)";
+const POINT: &str = "2 numbers exactly as read off that view's image, in its caption's convention";
+
+fn region() -> Value {
+	json!({"type": "object", "description": "Part of the page as fractions 0-1 of the full page (x, y = top-left).", "properties": {
+		"x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}}, "required": ["x", "y", "w", "h"]})
+}
+fn bx() -> Value {
+	json!({"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": BOX})
+}
+fn pt() -> Value {
+	json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": POINT})
+}
+fn view_id() -> Value {
+	json!({"type": "string", "description": "View id (e.g. \"v3\") of the render the locations were read from."})
+}
+fn layers() -> Value {
+	json!({"type": "array", "items": {"type": "string"}, "description": "PDF layer names to hide for this call only."})
+}
+
+fn def(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolDef {
+	ToolDef {
+		name: name.into(),
+		description: description.into(),
+		parameters: json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false}),
+	}
+}
+
+pub fn definitions() -> Vec<ToolDef> {
+	vec![
+		def("get_drawing", "Overview of the loaded drawing: pages (labels, paper sizes, scale set or not, item counts), takeoff items (categories) with counts, PDF layers and which are hidden.", json!({}), &[]),
+		def(
+			"view",
+			"Render part of a page with the takeoff drawn on it (numbered badges per item) and look at it. Returns the image with a view id; every location you hand back to other tools is read off a view and passed with its id. Whole sheets are unreadable at full-page scale: zoom with region (page fractions, coarse) or zoom_view + zoom_box (a box read off an earlier view, precise).",
+			json!({
+				"page": {"type": "integer", "description": "1-based page (default: the page the user is on)."},
+				"region": region(),
+				"zoom_view": view_id(),
+				"zoom_box": bx(),
+				"categories": {"type": "array", "items": {"type": "string"}, "description": "Only draw these items (ids or names)."},
+				"show_marks": {"type": "boolean"},
+				"show_measurements": {"type": "boolean"},
+				"show_annotations": {"type": "boolean"},
+				"hidden_layers": layers(),
+				"max_px": {"type": "integer", "description": "Long edge of the render (default 2000, capped for the model)."}
+			}),
+			&[],
+		),
+		def("read_items", "List takeoff items (200 per call) with ids, badges, categories, status, values.", json!({
+			"page": {"type": "integer"}, "category": {"type": "string"},
+			"kind": {"type": "string", "enum": ["mark", "measurement", "annotation"]}, "offset": {"type": "integer"}}), &[]),
+		def("find_items_at", "Which items are at a location (box or point read off a view). Use it before correcting or deleting: correct by LOCATION, never by badge number.", json!({
+			"view": view_id(), "box": bx(), "point": pt()}), &["view"]),
+		def(
+			"add_marks",
+			"Mark counted symbols: one box per instance, read off a view. Saved as PENDING for the user to confirm. Duplicates of existing marks in the same category are skipped. Attaches a check render.",
+			json!({
+				"view": view_id(),
+				"boxes": {"type": "array", "items": bx(), "description": "One box per symbol instance."},
+				"category": {"type": "string", "description": "Takeoff item id or name (created if new), e.g. \"Duplex outlet\"."},
+				"description": {"type": "string", "description": "What the symbol looks like (stored on a new item)."},
+				"note": {"type": "string"}
+			}),
+			&["view", "boxes", "category"],
+		),
+		def(
+			"add_measurements",
+			"Measure lengths (polylines), perimeters, areas (polygons) or angles (3 points: arm, vertex, arm) with vertices read off a view. Values come from the page scale. snap: true fits vertices onto the drawing's own lines (vector PDFs).",
+			json!({
+				"view": view_id(),
+				"items": {"type": "array", "items": {"type": "object", "properties": {
+					"type": {"type": "string", "enum": ["length", "perimeter", "area", "angle"]},
+					"points": {"type": "array", "items": pt()},
+					"label": {"type": "string"}, "note": {"type": "string"},
+					"depth": {"type": "number", "description": "Area only: depth in the scale unit (gives a volume)."}
+				}, "required": ["type", "points"]}},
+				"category": {"type": "string"},
+				"snap": {"type": "boolean"}
+			}),
+			&["view", "items"],
+		),
+		def("update_items", "Change up to 50 items: move/resize (new box or points + the view they were read from), recategorise, set status (pending|confirmed — only when the user asks), note, label, text, depth.", json!({
+			"items": {"type": "array", "items": {"type": "object", "properties": {
+				"id": {"type": "string"}, "view": view_id(), "box": bx(), "points": {"type": "array", "items": pt()},
+				"category": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "confirmed"]},
+				"note": {"type": "string"}, "label": {"type": "string"}, "text": {"type": "string"}, "depth": {"type": "number"}
+			}, "required": ["id"]}}}), &["items"]),
+		def("delete_items", "Delete items by id (get ids from find_items_at or a view's index). Items the user locked are kept.", json!({
+			"ids": {"type": "array", "items": {"type": "string"}}}), &["ids"]),
+		def("create_category", "Create a takeoff item (what is being counted or measured).", json!({
+			"name": {"type": "string"}, "kind": {"type": "string", "enum": ["count", "length", "area"]},
+			"color": {"type": "string", "description": "#RRGGBB"}, "icon": {"type": "string"}, "description": {"type": "string"},
+			"legend_view": view_id(), "legend_box": bx()}), &["name"]),
+		def("update_category", "Rename or restyle a takeoff item, or store where its legend symbol is.", json!({
+			"category": {"type": "string"}, "name": {"type": "string"}, "color": {"type": "string"}, "icon": {"type": "string"},
+			"description": {"type": "string"}, "legend_view": view_id(), "legend_box": bx()}), &["category"]),
+		def("summary", "Totals per item and per page × item (counts, pending vs confirmed, summed lengths/areas), and pages with no scale. Report numbers from here, never by counting yourself.", json!({
+			"page": {"type": "integer"}}), &[]),
+		def("add_annotation", "Add a review markup (not a quantity): text box, callout (box + leader tip point), cloud, rectangle, ellipse, line, arrow, polyline, polygon, highlight. Use for questions and flags to the user.", json!({
+			"view": view_id(), "kind": {"type": "string", "enum": ["text", "callout", "cloud", "rectangle", "ellipse", "line", "arrow", "polyline", "polygon", "highlight"]},
+			"box": bx(), "points": {"type": "array", "items": pt()}, "text": {"type": "string"}, "color": {"type": "string"}}), &["view", "kind"]),
+		def(
+			"set_scale",
+			"Set the page scale from a printed dimension: p1, p2 = the two arrowhead/tick points where the dimension line meets its extension lines (NOT the ends of the text), read off a zoomed view; distance + unit = the printed value. Points snap to line work by default. Then verify with check_scale on a DIFFERENT dimension.",
+			json!({"view": view_id(), "p1": pt(), "p2": pt(), "distance": {"type": "number"},
+				"unit": {"type": "string", "enum": ["ft", "in", "m", "cm", "mm"]}, "label": {"type": "string"}, "snap": {"type": "boolean"}}),
+			&["view", "p1", "p2", "distance", "unit"],
+		),
+		def("set_scale_preset", "Set a printed scale exactly from the sheet's paper size (e.g. 1/4\" = 1'-0\", 1\" = 20', 1:100). Only valid if the PDF is at full print size — verify with check_scale.", json!({
+			"page": {"type": "integer"}, "preset": {"type": "string"}, "all_pages": {"type": "boolean"}}), &["preset"]),
+		def("check_scale", "Measure between two points under the current scale without writing anything (measure-back check). Give expected to get the error %; within ~3% the scale holds.", json!({
+			"view": view_id(), "p1": pt(), "p2": pt(), "expected": {"type": "number"}, "snap": {"type": "boolean"}}), &["view", "p1", "p2"]),
+		def("calibrate", "Automatic scale: finds printed dimensions on the page (text layer, else a vision sweep), pins their endpoints, sets the scale and cross-checks it against a second dimension.", json!({
+			"page": {"type": "integer"}, "replace": {"type": "boolean"}, "hidden_layers": layers()}), &[]),
+		def(
+			"detect",
+			"Sweep for one symbol (or up to 8 at once via targets) across a page or region: the area is tiled at working resolution, each tile is read by the vision model, finds are deduplicated and saved as PENDING marks. Re-sweeping is safe (existing marks are skipped). Best with a legend sample (legend_view + legend_box); otherwise describe the symbol. Scope with page + region, or view (+ box).",
+			json!({
+				"category": {"type": "string"}, "symbol_hint": {"type": "string"},
+				"targets": {"type": "array", "items": {"type": "object", "properties": {"category": {"type": "string"}, "hint": {"type": "string"}}, "required": ["category", "hint"]}},
+				"legend_view": view_id(), "legend_box": bx(),
+				"page": {"type": "integer"}, "region": region(), "view": view_id(), "box": bx(), "hidden_layers": layers()
+			}),
+			&[],
+		),
+		def("trace", "Vision trace of linear runs (kind length → polylines) or areas (kind area → polygons) matching a description, across a page or region. Saved as measurements; vertices are approximate — check and adjust.", json!({
+			"kind": {"type": "string", "enum": ["length", "area"]}, "target": {"type": "string"}, "category": {"type": "string"},
+			"page": {"type": "integer"}, "region": region(), "view": view_id(), "box": bx(), "hidden_layers": layers()}), &["kind", "target"]),
+		def("read_text", "Read the PDF's own text (exact, with positions) on a page, a region, or the area of a view (optionally a box in it). Title blocks, schedules, notes, dimension strings. CAD text drawn as strokes has no text layer — read it from a view then.", json!({
+			"page": {"type": "integer"}, "region": region(), "view": view_id(), "box": bx(), "limit": {"type": "integer"}}), &[]),
+		def("search_text", "Find text across pages (sheet numbers, tags, spec references).", json!({
+			"query": {"type": "string"}, "pages": {"type": "string", "description": "e.g. \"1-5, 9\""},
+			"match_case": {"type": "boolean"}, "whole_word": {"type": "boolean"}, "limit": {"type": "integer"}}), &["query"]),
+		def("set_hidden_layers", "Hide PDF layers for everyone (SHARED: the user sees it too). Give the complete list to hide; [] shows all. For one sweep only, use hidden_layers on view/detect/trace instead.", json!({
+			"hidden": {"type": "array", "items": {"type": "string"}}}), &["hidden"]),
+		def("follow_line", "From a point on a drawn line, follow the connected line work until a fork or gap (vector PDFs) and report its length; add_to saves it as a length measurement.", json!({
+			"view": view_id(), "point": pt(), "add_to": {"type": "string", "description": "Category to save the run in."}, "label": {"type": "string"}}), &["view", "point"]),
+		def("set_viewport", "Show the user where you are working (their viewer highlights it).", json!({
+			"view": view_id(), "page": {"type": "integer"}, "region": region(), "label": {"type": "string"}}), &[]),
+	]
+}
+
+/// OpenAI `tools` array.
+pub fn openai_tools() -> Vec<Value> {
+	definitions()
+		.into_iter()
+		.map(|d| json!({"type": "function", "function": {"name": d.name, "description": d.description, "parameters": d.parameters}}))
+		.collect()
+}

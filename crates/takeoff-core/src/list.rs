@@ -105,7 +105,8 @@ pub fn rows(doc: &Document) -> Vec<MarkupRow> {
 			hidden: c.is_some_and(|c| c.hidden),
 		});
 	}
-	for m in &d.measurements {
+	// `probe_*` are the agent's transient check shapes, not takeoff items.
+	for m in d.measurements.iter().filter(|m| !m.id.starts_with("probe_")) {
 		let c = cat(&m.category_id);
 		let q = doc.quantity(m);
 		let kind = match m.kind {

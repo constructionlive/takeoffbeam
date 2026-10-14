@@ -181,6 +181,34 @@ impl AiPanel {
 		}
 	}
 
+	/// First use: signed in → the account's default cloud model; else the biggest
+	/// local vision model that fits right now.
+	pub fn auto_pick_model(&mut self, settings: &mut Settings) {
+		if !settings.model.is_empty() {
+			return;
+		}
+		if self.cloud.is_some() {
+			let default = self.cloud_me.as_ref().and_then(|m| m.default_model.clone()).filter(|id| self.cloud_models.iter().any(|c| &c.id == id));
+			if let Some(id) = default.or_else(|| self.cloud_models.first().map(|m| m.id.clone())) {
+				settings.model = format!("cloud:{id}");
+				settings.save();
+				return;
+			}
+		}
+		let cache = Self::cache(settings);
+		let mut best: Option<(u64, String)> = None;
+		for m in self.installed.iter().filter(|m| m.vision) {
+			let fit = takeoff_models::fit_for(m, settings.context_tokens, cache);
+			if fit.verdict == Verdict::Fits && best.as_ref().is_none_or(|(sz, _)| m.size_bytes > *sz) {
+				best = Some((m.size_bytes, m.id.clone()));
+			}
+		}
+		if let Some((_, id)) = best {
+			settings.model = format!("local:{id}");
+			settings.save();
+		}
+	}
+
 	fn provider(&mut self, settings: &Settings) -> Result<ProviderConfig, String> {
 		let m = settings.model.clone();
 		if let Some(id) = m.strip_prefix("local:") {
@@ -250,6 +278,7 @@ impl AiPanel {
 		if text.trim().is_empty() || self.turn.is_some() {
 			return;
 		}
+		takeoff_agent::set_local_thinking(settings.local_thinking);
 		match self.provider(settings) {
 			Ok(provider) => {
 				let session = self.session(&doc.path);
@@ -550,7 +579,13 @@ impl AiPanel {
 						let b = ui.add_enabled(can, egui::Button::new(RichText::new(format!("{}  Send", i::SEND)).color(p.on_accent).font(theme::semibold(12.5))).fill(p.accent_fill).corner_radius(4));
 						if (b.clicked() || enter) && can {
 							let text = std::mem::take(&mut self.input).trim().to_string();
-							self.send(text, doc, settings);
+							self.auto_pick_model(settings);
+							if settings.model.is_empty() {
+								self.input = text;
+								self.models_open = true;
+							} else {
+								self.send(text, doc, settings);
+							}
 						}
 					}
 				});
@@ -623,6 +658,10 @@ impl AiPanel {
 							}
 						}
 					});
+					if ui.checkbox(&mut settings.local_thinking, "Let local models think (slower)").on_hover_text("Better answers on hard sheets, but each step can take minutes on a laptop").changed() {
+						takeoff_agent::set_local_thinking(settings.local_thinking);
+						settings.save();
+					}
 					if ui.checkbox(&mut settings.kv_q8, "Compact context (Q8 cache)").on_hover_text("Halves the memory the conversation needs, with negligible quality loss").changed() {
 						self.fits.clear();
 						settings.save();

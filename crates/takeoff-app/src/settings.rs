@@ -32,6 +32,8 @@ pub struct Settings {
 	pub llama_server: String,
 	pub context_tokens: u32,
 	pub kv_q8: bool,
+	/// Let local models reason before answering (better, much slower).
+	pub local_thinking: bool,
 	/// Saved takeoff items (Bluebeam Tool Chest), reusable across drawings.
 	pub tool_chest: Vec<Category>,
 	pub left_panel: bool,
@@ -57,6 +59,7 @@ impl Default for Settings {
 			llama_server: String::new(),
 			context_tokens: 32_768,
 			kv_q8: true,
+			local_thinking: false,
 			tool_chest: vec![],
 			left_panel: true,
 			right_panel: true,

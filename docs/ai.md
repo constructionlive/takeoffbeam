@@ -99,3 +99,18 @@ reads positions off a numbered **view** (`v3`) and the tools convert them.
 | `set_viewport` | Show where it's looking |
 
 The same tools are available to other AI apps through the [MCP server](cli.md#mcp).
+
+## What to expect from local models (measured)
+
+These are measurements from Qwen3.8 27B (Q4_K_M) on an M3 Max with 36 GB.
+
+- **Coordinates.** The model's boxes were exactly right: 23 of 23 symbols on target with the
+  Qwen 0–1000 `[x,y]` convention. The other conventions scored 10 of 23 and 0 of 23.
+- **Scale.** It set the scale from a grid dimension and checked it back against a second
+  dimension within 2.4%. On another run it rejected a bad automatic calibration (40% cross-check
+  disagreement) and set the scale by hand instead.
+- **Speed.** About 30–140 s per step, so a 15-step job takes 10–30 minutes. Use a cloud model for
+  interactive work, or a smaller local model. Thinking is off by default for local models; turn
+  it on in *Models* for hard sheets.
+- **Not yet verified with a live local model:** full symbol sweeps (`detect`), `trace` and
+  `follow_line`. They are covered by tests with a scripted model.

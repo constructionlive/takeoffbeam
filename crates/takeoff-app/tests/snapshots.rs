@@ -135,3 +135,26 @@ fn ui_snapshots() {
 		}
 	}
 }
+
+#[test]
+#[ignore]
+fn compare_snapshot() {
+	let a = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !a.exists() {
+		return;
+	}
+	let mut h = harness(ThemeChoice::Light);
+	h.run_steps(3);
+	let ctx = h.ctx.clone();
+	h.state_mut().as_mut().unwrap().open(a.clone(), &ctx);
+	settle(&mut h, |app| app.debug_doc().is_some_and(|d| d.loaded && d.base.contains_key(&d.page)), Duration::from_secs(20));
+	if let Some(d) = h.state_mut().as_mut().unwrap().debug_doc() {
+		d.go_to_page(4);
+	}
+	settle(&mut h, |app| app.debug_doc().is_some_and(|d| d.base.contains_key(&4)), Duration::from_secs(10));
+	if let Some(d) = h.state_mut().as_mut().unwrap().debug_doc() {
+		d.start_compare(a.clone(), 5, &ctx);
+	}
+	settle(&mut h, |app| app.debug_doc().is_some_and(|d| d.compare.as_ref().is_some_and(|c| c.tex.is_some())), Duration::from_secs(20));
+	save(&mut h, "light-compare");
+}
