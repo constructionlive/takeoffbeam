@@ -5,8 +5,19 @@
 //! the same pixels as the matching crop of a full-page render at that DPI,
 //! without rasterizing the rest of the sheet.
 
+pub mod burn;
+pub mod cos;
+pub mod export;
+pub mod layers;
+pub mod outline;
+pub mod search;
+pub mod tools;
+pub mod vectors;
+
+use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use image::RgbaImage;
 use pdfium_render::prelude::*;
@@ -23,6 +34,8 @@ pub enum PdfError {
 	PageOutOfRange(u32, u32),
 	#[error("empty render region")]
 	EmptyRegion,
+	#[error("{0}")]
+	Io(String),
 }
 
 static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
@@ -85,13 +98,98 @@ pub struct Render {
 pub struct Drawing {
 	doc: PdfDocument<'static>,
 	path: PathBuf,
+	layers: Option<layers::LayerInfo>,
+	hidden: HashSet<String>,
+}
+
+/// Original file bytes (memory-mapped) followed by an incremental update.
+struct ChainReader {
+	base: Arc<memmap2::Mmap>,
+	tail: Vec<u8>,
+	pos: u64,
+}
+
+impl Read for ChainReader {
+	fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+		let base_len = self.base.len() as u64;
+		let total = base_len + self.tail.len() as u64;
+		if self.pos >= total {
+			return Ok(0);
+		}
+		let n = if self.pos < base_len {
+			let src = &self.base[self.pos as usize..];
+			let n = src.len().min(buf.len());
+			buf[..n].copy_from_slice(&src[..n]);
+			n
+		} else {
+			let src = &self.tail[(self.pos - base_len) as usize..];
+			let n = src.len().min(buf.len());
+			buf[..n].copy_from_slice(&src[..n]);
+			n
+		};
+		self.pos += n as u64;
+		Ok(n)
+	}
+}
+
+impl Seek for ChainReader {
+	fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+		let total = (self.base.len() + self.tail.len()) as i64;
+		let next = match to {
+			SeekFrom::Start(p) => p as i64,
+			SeekFrom::End(d) => total + d,
+			SeekFrom::Current(d) => self.pos as i64 + d,
+		};
+		if next < 0 {
+			return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"));
+		}
+		self.pos = next as u64;
+		Ok(self.pos)
+	}
 }
 
 impl Drawing {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self, PdfError> {
 		let path = path.as_ref().to_path_buf();
 		let doc = pdfium()?.load_pdf_from_file(&path, None)?;
-		Ok(Self { doc, path })
+		// Layer list is optional: a parse failure just means "no layer control".
+		let layers = layers::LayerInfo::read(&path).ok().flatten();
+		Ok(Self { doc, path, layers, hidden: HashSet::new() })
+	}
+
+	/// The PDF's layers (optional content groups), de-duplicated by name.
+	pub fn layer_names(&self) -> Vec<String> {
+		self.layers.as_ref().map(|l| l.names()).unwrap_or_default()
+	}
+
+	/// Names of layers the document itself hides by default.
+	pub fn default_off_layers(&self) -> Vec<String> {
+		self.layers
+			.as_ref()
+			.map(|l| l.layers.iter().filter(|x| x.default_off).map(|x| x.name.clone()).collect())
+			.unwrap_or_default()
+	}
+
+	pub fn hidden_layers(&self) -> &HashSet<String> {
+		&self.hidden
+	}
+
+	/// Hide exactly these layers (by name) in every later render. Reloads the
+	/// document from "file + small update" in memory; the file is untouched.
+	pub fn set_hidden_layers(&mut self, hidden: &HashSet<String>) -> Result<(), PdfError> {
+		if *hidden == self.hidden {
+			return Ok(());
+		}
+		let Some(info) = &self.layers else { return Ok(()) };
+		let doc = if hidden.is_empty() && info.layers.iter().all(|l| !l.default_off) {
+			pdfium()?.load_pdf_from_file(&self.path, None)?
+		} else {
+			let reader = ChainReader { base: info.mmap(), tail: info.update_hiding(hidden), pos: 0 };
+			pdfium()?.load_pdf_from_reader(reader, None)?
+		};
+		self.doc = doc;
+		self.hidden = hidden.clone();
+		Ok(())
 	}
 
 	pub fn path(&self) -> &Path {
@@ -168,6 +266,31 @@ impl Drawing {
 			},
 			dpi: dpi as f32,
 		})
+	}
+
+	/// Number of the bookmark tree, flattened with depth.
+	pub fn outline(&self) -> Vec<outline::Bookmark> {
+		outline::outline(&self.doc)
+	}
+
+	/// Stroked line work on a page, for snapping.
+	pub fn segments(&self, page: u32) -> Result<Vec<takeoff_core::snap::Segment>, PdfError> {
+		Ok(vectors::page_segments(&self.page(page)?)?)
+	}
+
+	/// Search one page.
+	pub fn search_page(&self, page: u32, query: &str, match_case: bool, whole_word: bool, limit: usize) -> Result<Vec<search::Hit>, PdfError> {
+		Ok(search::search_page(&self.page(page)?, page, query, match_case, whole_word, limit))
+	}
+
+	/// Positioned text lines (optionally within a region of the page).
+	pub fn text_runs(&self, page: u32, region: Option<FracRect>, limit: usize) -> Result<Vec<search::TextRun>, PdfError> {
+		Ok(search::text_runs(&self.page(page)?, region.map(|r| (r.x, r.y, r.w, r.h)), limit))
+	}
+
+	/// The underlying pdfium document (for exports that draw into it).
+	pub fn document(&self) -> &PdfDocument<'static> {
+		&self.doc
 	}
 
 	/// All text on the page in reading order (as pdfium extracts it).

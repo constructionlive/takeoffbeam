@@ -16,7 +16,9 @@ pub mod list;
 pub mod model;
 pub mod normalize;
 pub mod numbering;
+pub mod pages;
 pub mod sidecar;
+pub mod snap;
 pub mod time;
 pub mod units;
 

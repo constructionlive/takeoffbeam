@@ -18,6 +18,10 @@ anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest", "image_latest", "thread_safe"] }
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+memmap2 = "0.9"
+flate2 = "1"
+resvg = { version = "0.48", default-features = false, features = ["text"] }
+ab_glyph = "0.2"
 takeoff-core = { path = "crates/takeoff-core" }
 takeoff-pdf = { path = "crates/takeoff-pdf" }
 takeoff-models = { path = "crates/takeoff-models" }

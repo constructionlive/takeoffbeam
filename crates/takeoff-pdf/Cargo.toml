@@ -12,3 +12,7 @@ takeoff-core.workspace = true
 pdfium-render.workspace = true
 image.workspace = true
 thiserror.workspace = true
+memmap2.workspace = true
+flate2.workspace = true
+resvg.workspace = true
+ab_glyph.workspace = true
