@@ -20,6 +20,7 @@ use crate::right_panel::{describe_scale, RightPanel};
 use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, Palette};
 use crate::tools::Tool;
+use crate::updates::{self, DownloadState, Updater};
 use crate::widgets;
 
 enum Dialog {
@@ -48,6 +49,8 @@ pub struct TakeoffApp {
 	theme_applied: Option<bool>,
 	page_input: String,
 	pdf_edits_confirmed: bool,
+	updater: Updater,
+	notes_open: bool,
 }
 
 impl TakeoffApp {
@@ -68,6 +71,8 @@ impl TakeoffApp {
 			theme_applied: None,
 			page_input: String::new(),
 			pdf_edits_confirmed: false,
+			updater: Updater::new(),
+			notes_open: false,
 		};
 		app.apply_theme(ctx);
 		app.canvas.show_badges = app.settings.show_badges;
@@ -155,8 +160,21 @@ impl TakeoffApp {
 		self.ai.poll(&ctx, &mut self.canvas, doc, &self.settings);
 		self.shortcuts(&ctx);
 		self.handle_canvas_requests();
+		self.updater.tick(&ctx);
+		if self.updater.manual && !self.updater.checking() && self.updater.checked_once() {
+			self.updater.manual = false;
+			match (self.updater.available(""), self.updater.error()) {
+				(Some(r), _) => {
+					self.updater.dismissed = false;
+					self.toast(format!("Takeoff Desk {} is available", r.version), false);
+				}
+				(None, Some(e)) => self.toast(format!("Couldn't check for updates: {}", e.chars().take(120).collect::<String>()), true),
+				(None, None) => self.toast(format!("You're up to date (v{})", env!("CARGO_PKG_VERSION")), false),
+			}
+		}
 
 		self.top_bar(ui, &p);
+		self.update_banner(ui, &p);
 		if !self.docs.is_empty() {
 			self.status_bar(ui, &p);
 		}
@@ -218,6 +236,16 @@ impl TakeoffApp {
 				if ui.add(egui::Button::new(RichText::new(i::PLUS).font(theme::icon_font(14.0)).color(p.text2)).frame(false)).on_hover_text("Open drawing (⌘O)").clicked() {
 					self.open_dialog(&ctx);
 				}
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					if ui.add(egui::Button::new(RichText::new(format!("{}  Feedback", i::MESSAGE_SQUARE_TEXT)).size(12.5).color(p.text2)).frame(false)).on_hover_text("Email the Takeoff Desk team (rahul@construction.live)").clicked() {
+						self.send_feedback();
+					}
+					if self.updater.available(&self.settings.skipped_update).is_some() && self.updater.dismissed {
+						if ui.add(egui::Button::new(RichText::new(format!("{}  Update", i::DOWNLOAD)).size(12.5).color(p.accent)).frame(false)).on_hover_text("A new version is available").clicked() {
+							self.updater.dismissed = false;
+						}
+					}
+				});
 			});
 		});
 		if self.docs.is_empty() {
@@ -473,6 +501,16 @@ impl TakeoffApp {
 			}
 		});
 		ui.menu_button("Help", |ui| {
+			if ui.button(format!("{}  Send feedback…", i::MESSAGE_SQUARE_TEXT)).clicked() {
+				ui.close();
+				self.send_feedback();
+			}
+			if ui.button(format!("{}  Check for updates…", i::REFRESH_CW)).clicked() {
+				ui.close();
+				self.updater.manual = true;
+				self.updater.check(&ctx);
+			}
+			ui.separator();
 			if ui.button(format!("{}  Keyboard shortcuts    ?", i::KEYBOARD)).clicked() {
 				self.dialog = Some(Dialog::Shortcuts);
 				ui.close();
@@ -1416,6 +1454,80 @@ impl TakeoffApp {
 		match takeoff_core::sidecar::save_to(&dst, &data) {
 			Ok(()) => self.toast("Exported takeoff file", false),
 			Err(e) => self.toast(e.to_string(), true),
+		}
+	}
+
+	fn send_feedback(&mut self) {
+		let url = updates::feedback_mailto(&self.settings.model);
+		if open::that(&url).is_err() {
+			self.toast("No email app found — write to rahul@construction.live", true);
+		}
+	}
+
+	fn update_banner(&mut self, ui: &mut egui::Ui, p: &Palette) {
+		let Some(rel) = self.updater.available(&self.settings.skipped_update) else { return };
+		if self.updater.dismissed && !rel.critical {
+			return;
+		}
+		let ctx = ui.ctx().clone();
+		let state = self.updater.download_state();
+		let fill = if rel.critical { Color32::from_rgb(0x7F, 0x1D, 0x1D) } else if p.dark { Color32::from_rgb(0x2A, 0x1C, 0x14) } else { Color32::from_rgb(0xFF, 0xF1, 0xEA) };
+		egui::Panel::top("update-banner").frame(egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(12, 6)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
+			ui.horizontal(|ui| {
+				ui.label(RichText::new(if rel.critical { i::CIRCLE_ALERT } else { i::SPARKLES }).font(theme::icon_font(15.0)).color(if rel.critical { Color32::WHITE } else { p.accent }));
+				let title = if rel.critical { format!("Important update: Takeoff Desk {}", rel.version) } else { format!("Takeoff Desk {} is available", rel.version) };
+				ui.label(RichText::new(title).font(theme::semibold(13.0)).color(if rel.critical { Color32::WHITE } else { p.text }));
+				ui.label(RichText::new(format!("you have {}", env!("CARGO_PKG_VERSION"))).size(12.0).color(if rel.critical { Color32::from_gray(220) } else { p.text2 }));
+				let first = rel.notes.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim_start_matches(['-', '*', '#', ' ']).to_string();
+				if !first.is_empty() {
+					ui.add(egui::Label::new(RichText::new(format!("· {first}")).size(12.0).color(if rel.critical { Color32::from_gray(230) } else { p.text2 })).truncate());
+				}
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					if !rel.critical && ui.small_button("Skip this version").clicked() {
+						self.settings.skipped_update = rel.version.clone();
+						self.settings.save();
+					}
+					if !rel.critical && ui.small_button("Later").clicked() {
+						self.updater.dismissed = true;
+					}
+					if !rel.notes.trim().is_empty() && ui.small_button("What's new").clicked() {
+						self.notes_open = true;
+					}
+					match &state {
+						DownloadState::Downloading { done, total } => {
+							let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+							ui.add(egui::ProgressBar::new(frac).desired_width(160.0).text(format!("{:.0} / {:.0} MB", *done as f64 / 1e6, *total as f64 / 1e6)).fill(p.accent_fill));
+						}
+						DownloadState::Done(path) => {
+							if ui.add(egui::Button::new(RichText::new(format!("{}  Open installer", i::EXTERNAL_LINK)).color(p.on_accent)).fill(p.accent_fill)).on_hover_text(path.display().to_string()).clicked() {
+								let _ = open::that(path);
+							}
+							ui.label(RichText::new("Downloaded — quit Takeoff Desk, then install").size(12.0).color(p.text2));
+						}
+						DownloadState::Failed(e) => {
+							if ui.button("Open download page").clicked() {
+								let _ = open::that(if rel.page.is_empty() { updates::RELEASES_PAGE } else { &rel.page });
+							}
+							ui.label(RichText::new("Download failed").color(p.danger)).on_hover_text(e);
+						}
+						DownloadState::Idle => {
+							if ui.add(egui::Button::new(RichText::new(format!("{}  Download & install", i::DOWNLOAD)).color(p.on_accent).font(theme::semibold(12.5))).fill(p.accent_fill).corner_radius(4)).clicked() {
+								self.updater.download_and_open(&rel, &ctx);
+							}
+						}
+					}
+				});
+			});
+		});
+		if self.notes_open {
+			let mut open = true;
+			egui::Window::new(format!("What's new in {}", rel.version)).open(&mut open).collapsible(false).resizable(true).default_width(460.0).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).show(&ctx, |ui| {
+				if !rel.date.is_empty() {
+					ui.label(RichText::new(&rel.date).color(p.muted).size(12.0));
+				}
+				egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| crate::ai_panel::markdown(ui, p, &rel.notes));
+			});
+			self.notes_open = open;
 		}
 	}
 

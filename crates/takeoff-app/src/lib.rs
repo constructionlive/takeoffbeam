@@ -12,6 +12,7 @@ pub mod right_panel;
 pub mod settings;
 pub mod theme;
 pub mod tools;
+pub mod updates;
 pub mod widgets;
 pub mod worker;
 

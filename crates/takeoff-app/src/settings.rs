@@ -40,6 +40,8 @@ pub struct Settings {
 	pub right_panel: bool,
 	pub markups_list: bool,
 	pub onboarded: bool,
+	/// "Skip this version" for update notices.
+	pub skipped_update: String,
 }
 
 impl Default for Settings {
@@ -65,6 +67,7 @@ impl Default for Settings {
 			right_panel: true,
 			markups_list: true,
 			onboarded: false,
+			skipped_update: String::new(),
 		}
 	}
 }

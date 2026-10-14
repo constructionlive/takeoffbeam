@@ -23,6 +23,7 @@ image.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 dirs.workspace = true
+reqwest.workspace = true
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "persistence"] }
 egui_extras = { version = "0.35", default-features = false }
 rfd = "0.15"

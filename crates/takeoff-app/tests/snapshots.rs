@@ -158,3 +158,25 @@ fn compare_snapshot() {
 	settle(&mut h, |app| app.debug_doc().is_some_and(|d| d.compare.as_ref().is_some_and(|c| c.tex.is_some())), Duration::from_secs(20));
 	save(&mut h, "light-compare");
 }
+
+#[test]
+#[ignore]
+fn update_banner_snapshot() {
+	// A tiny local feed announcing a newer version.
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+	let port = listener.local_addr().unwrap().port();
+	std::thread::spawn(move || {
+		use std::io::{Read, Write};
+		for mut s in listener.incoming().flatten() {
+			let mut buf = [0u8; 2048];
+			let _ = s.read(&mut buf);
+			let body = r#"{"version":"0.0.2","date":"2026-11-02","notes":"- Auto area: click inside a room to fill it\n- 2x faster thumbnails\n- Fixes for rotated sheets","downloads":{"macos-arm64":"https://example.invalid/a.dmg"}}"#;
+			let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+		}
+	});
+	std::env::set_var("TAKEOFF_UPDATE_URL", format!("http://127.0.0.1:{port}/latest.json"));
+	let mut h = harness(ThemeChoice::Dark);
+	h.run_steps(3);
+	settle(&mut h, |_| false, Duration::from_secs(2));
+	save(&mut h, "dark-update");
+}

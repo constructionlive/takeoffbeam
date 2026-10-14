@@ -60,3 +60,32 @@ until it has a code-signing certificate.
 
 The code is portable (egui/wgpu, pdfium, llama.cpp) and CI builds and tests it on Ubuntu.
 A packaged AppImage is on the roadmap.
+
+## Shipping an update
+
+Every installed copy checks the update feed at launch and every 6 hours:
+`https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest.json` (Cloudflare R2).
+If that fails, it falls back to the latest GitHub release. When the feed has a newer version, a
+banner offers **Download & install**: it downloads the dmg or setup.exe for the user's platform
+into Downloads and opens it. It also has *What's new*, *Later* and *Skip this version*.
+*Help → Check for updates…* runs the check on demand.
+
+1. Bump `version` in the root `Cargo.toml`.
+2. Build the installers:
+   - `SIGN_IDENTITY=… NOTARIZE=1 … scripts/package-macos.sh`
+   - `scripts/package-windows.sh`
+3. Publish, with R2 credentials in the environment:
+   ```sh
+   NOTES="- Auto area\n- Faster thumbnails" scripts/publish-update.sh
+   ```
+   Add `CRITICAL=1` for a fix users can't skip. Add `DRY_RUN=1` to preview the manifest.
+4. Optionally tag `vX.Y.Z` and push. CI builds the Windows installer and attaches it to the
+   GitHub release.
+
+![Update banner](images/dark-update.png)
+
+## Feedback
+
+*Feedback* (top right, or *Help → Send feedback…*) opens the user's email app with a message to
+rahul@construction.live. The subject and body are pre-filled with the version, OS and the model
+in use.

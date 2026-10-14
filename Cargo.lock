@@ -4256,6 +4256,7 @@ dependencies = [
  "image",
  "open",
  "parking_lot",
+ "reqwest",
  "rfd",
  "serde",
  "serde_json",
