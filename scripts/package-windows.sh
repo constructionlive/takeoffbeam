@@ -54,7 +54,10 @@ cp "$VENDOR/llama/"* "$STAGE/bin/"
 cp LICENSE "$STAGE/LICENSE.txt"
 cp NOTICE "$STAGE/NOTICE.txt"
 
+# Native Windows tools (makensis) need C:\ paths, not Git-Bash /c/ paths.
+winpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }
+
 echo "› building installer"
 OUT="$ROOT/dist/Takeoff-Desk-${VERSION}-x64-setup.exe"
-"${MAKENSIS:-makensis}" -V2 -DVERSION="$VERSION" -DSTAGE="$STAGE" -DOUTFILE="$OUT" -DVCREDIST="$VENDOR/vc_redist.x64.exe" installer/windows/takeoff-desk.nsi
+"${MAKENSIS:-makensis}" -V2 -DVERSION="$VERSION" -DSTAGE="$(winpath "$STAGE")" -DOUTFILE="$(winpath "$OUT")" -DVCREDIST="$(winpath "$VENDOR/vc_redist.x64.exe")" "$(winpath "$ROOT/installer/windows/takeoff-desk.nsi")"
 echo "✓ $OUT ($(du -h "$OUT" | cut -f1))"
