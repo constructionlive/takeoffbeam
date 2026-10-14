@@ -13,7 +13,15 @@ the scale, counts symbols, measures runs, reads title blocks, and checks its own
 a local model on your machine, or on cloud models if you sign in to
 [construction.live](https://construction.live).
 
-![Takeoff Desk](docs/images/dark-takeoff.png)
+[![Watch the launch film](docs/media/launch-preview.gif)](docs/media/Takeoff-Desk-launch.mp4)
+
+▶ **[Watch the 74-second launch film](docs/media/Takeoff-Desk-launch.mp4)** (1080p).
+
+**Download:**
+- [macOS (Apple silicon)](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-arm64.dmg), signed and notarized
+- [Windows 10/11 (x64)](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-x64-setup.exe)
+
+These links always point at the newest version.
 
 - **Takeoff:**
   - Counts, lengths, perimeters, areas with cutouts, volumes and angles.
@@ -31,7 +39,8 @@ a local model on your machine, or on cloud models if you sign in to
 - **AI agent:**
   - Drawing tools only: no file system, no shell. You review everything it adds.
   - Local models through llama.cpp, with a memory check before loading. Cloud models through
-    construction.live. Or any OpenAI-compatible endpoint.
+    construction.live. Your own **Claude Code or Codex** subscription. Or any OpenAI-compatible
+    endpoint.
 - **For other tools:**
   - The `takeoff` CLI.
   - An MCP server, so Claude Desktop or Cursor can work a drawing.
@@ -43,8 +52,8 @@ a local model on your machine, or on cloud models if you sign in to
 
 ## Get it
 
-- **macOS (Apple silicon):** the `.dmg` from Releases, signed and notarized by Neuratwin Inc.
-- **Windows 10/11 (x64):** `Takeoff-Desk-<version>-x64-setup.exe` from Releases.
+- **macOS (Apple silicon):** [Takeoff-Desk-arm64.dmg](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-arm64.dmg), signed and notarized by Neuratwin Inc.
+- **Windows 10/11 (x64):** [Takeoff-Desk-x64-setup.exe](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-x64-setup.exe).
 - **From source:** `scripts/fetch-pdfium.sh && cargo run --release -p takeoff-app`.
 
 See the [docs](docs/README.md):

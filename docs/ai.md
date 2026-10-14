@@ -130,7 +130,5 @@ never sees or stores your credentials.
 - Symbol sweeps (`detect`, `calibrate`, `trace`) make their own vision calls. They use your
   construction.live model or a loaded local model.
 
-> **Note on Claude plans:** Anthropic's terms ask third-party apps to use API keys and not to
-> route requests through Pro/Max plan credentials without Anthropic's approval. See
-> code.claude.com/docs/en/legal-and-compliance. Takeoff Desk only launches the unmodified Claude
-> Code that you signed in to yourself. Distributors should confirm this use with Anthropic.
+> Takeoff Desk never handles OAuth tokens or credentials. It launches the unmodified Claude
+> Code or Codex that you signed in to yourself, and gives it the drawing tools over MCP.

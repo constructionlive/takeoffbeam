@@ -42,6 +42,12 @@ if [ -f "$WIN" ]; then
 fi
 DOWNLOADS+="}"
 
+# Stable "latest" links for websites and emails (they never change between releases).
+[ -f "$MAC" ] && upload "$MAC" "$PREFIX/latest/Takeoff-Desk-arm64.dmg" "application/x-apple-diskimage" "public, max-age=300"
+[ -f "$WIN" ] && upload "$WIN" "$PREFIX/latest/Takeoff-Desk-x64-setup.exe" "application/vnd.microsoft.portable-executable" "public, max-age=300"
+VIDEO="docs/media/Takeoff-Desk-launch.mp4"
+[ -f "$VIDEO" ] && upload "$VIDEO" "$PREFIX/latest/Takeoff-Desk-launch.mp4" "video/mp4" "public, max-age=3600"
+
 MANIFEST="$(mktemp)"
 NOTES="${NOTES:-}" VERSION="$VERSION" CRITICAL="${CRITICAL:-0}" DOWNLOADS="$DOWNLOADS" python3 - > "$MANIFEST" <<'PY'
 import json, os, datetime
