@@ -186,7 +186,8 @@ impl RightPanel {
 			};
 			let (cat, active) = {
 				let d = doc.doc.lock();
-				(d.data.category(&cid).cloned(), canvas.active_category.as_deref() == Some(cid.as_str()))
+				// Highlighted only while a takeoff tool is actually recording into it.
+				(d.data.category(&cid).cloned(), canvas.active_category.as_deref() == Some(cid.as_str()) && canvas.tool.category_kind().is_some())
 			};
 			let Some(cat) = cat else { continue };
 			if let Some(c) = line.cost {
@@ -198,7 +199,10 @@ impl RightPanel {
 				.stroke(egui::Stroke::new(1.0, if active { p.accent } else { p.border }))
 				.corner_radius(4)
 				.inner_margin(egui::Margin::symmetric(10, 8));
-			let resp = frame.show(ui, |ui| {
+			// The card's own click sense is registered *before* its children, so the
+			// eye / ⋯ buttons and the rename field on top of it still get their clicks.
+			let mut name_clicked = false;
+			let resp = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| frame.show(ui, |ui| {
 				ui.horizontal(|ui| {
 					let sw = widgets::swatch(ui, hex(&cat.color), 14.0);
 					sw.on_hover_text("Color");
@@ -224,6 +228,8 @@ impl RightPanel {
 						let l = ui.add(egui::Label::new(RichText::new(&cat.name).font(theme::semibold(12.5))).truncate().sense(egui::Sense::click()));
 						if l.double_clicked() {
 							self.renaming = Some((cid.clone(), cat.name.clone()));
+						} else if l.clicked() {
+							name_clicked = true;
 						}
 					}
 					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -364,13 +370,19 @@ impl RightPanel {
 						}
 					});
 				}
-			});
-			let r = resp.response.interact(egui::Sense::click());
-			if r.clicked() {
-				canvas.active_category = Some(cid.clone());
-				canvas.set_tool(match cat.kind() { CategoryKind::Count => Tool::Count, CategoryKind::Length => if canvas.tool == Tool::Perimeter { Tool::Perimeter } else { Tool::Length }, CategoryKind::Area => Tool::Area });
+			}));
+			let r = resp.response;
+			if r.clicked() || name_clicked {
+				if active {
+					// Second click: stop taking off this item.
+					canvas.active_category = None;
+					canvas.set_tool(Tool::Select);
+				} else {
+					canvas.active_category = Some(cid.clone());
+					canvas.set_tool(match cat.kind() { CategoryKind::Count => Tool::Count, CategoryKind::Length => if canvas.tool == Tool::Perimeter { Tool::Perimeter } else { Tool::Length }, CategoryKind::Area => Tool::Area });
+				}
 			}
-			r.on_hover_text("Click to keep taking off this item");
+			r.on_hover_text(if active { "Click again to stop (or press Esc)" } else { "Click to take off this item" });
 			ui.add_space(4.0);
 		}
 		if any_cost {

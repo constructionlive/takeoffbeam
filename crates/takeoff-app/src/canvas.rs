@@ -112,6 +112,7 @@ impl Canvas {
 			self.drag = None;
 		} else if self.tool != Tool::Select {
 			self.tool = Tool::Select;
+			self.active_category = None;
 		} else {
 			doc.selection.clear();
 		}
@@ -168,16 +169,23 @@ impl Canvas {
 		painter.rect_filled(rect, 0.0, p.canvas);
 
 		if !doc.loaded {
-			let msg = doc.error.clone().unwrap_or_else(|| format!("Opening {}…", doc.name));
-			painter.text(rect.center(), Align2::CENTER_CENTER, msg, theme::medium(14.0), p.text2);
-			if doc.error.is_none() {
-				ctx.request_repaint_after(std::time::Duration::from_millis(50));
+			match doc.error.clone() {
+				Some(e) => {
+					painter.text(rect.center(), Align2::CENTER_CENTER, e, theme::medium(14.0), p.danger);
+				}
+				None => {
+					let c = rect.center();
+					ui.put(Rect::from_center_size(c - Vec2::new(0.0, 22.0), Vec2::splat(30.0)), egui::Spinner::new().size(30.0).color(p.accent));
+					painter.text(c + Vec2::new(0.0, 14.0), Align2::CENTER_CENTER, format!("Opening {}…", doc.name), theme::medium(14.0), p.text2);
+					painter.text(c + Vec2::new(0.0, 36.0), Align2::CENTER_CENTER, "Large drawing sets can take a moment", theme::medium(12.0), p.muted);
+				}
 			}
 			return;
 		}
 
 		self.navigate(ui, &resp, doc, wheel_zooms);
 		self.paint_page(&painter, doc, p);
+		self.page_spinner(ui, doc, p);
 		self.paint_items(&painter, doc, p);
 		self.paint_overlays(&painter, doc, p);
 		self.interact(ui, &resp, doc, p, snap_on);
@@ -223,6 +231,16 @@ impl Canvas {
 		}
 	}
 
+	fn page_spinner(&self, ui: &mut egui::Ui, doc: &OpenDoc, p: &Palette) {
+		let waiting_base = !doc.base.contains_key(&doc.page);
+		if waiting_base {
+			let r = doc.page_rect().intersect(doc.canvas_rect);
+			if r.width() > 40.0 && r.height() > 40.0 {
+				ui.put(Rect::from_center_size(r.center(), Vec2::splat(28.0)), egui::Spinner::new().size(28.0).color(p.accent));
+			}
+		}
+	}
+
 	fn paint_page(&self, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
 		let pr = doc.page_rect();
 		// Fluent-style elevation: two soft shadow layers.
@@ -255,9 +273,6 @@ impl Canvas {
 					}
 				}
 			}
-		}
-		if !doc.base.contains_key(&doc.page) {
-			painter.text(pr.center(), Align2::CENTER_CENTER, "Rendering…", theme::medium(13.0), Color32::from_gray(140));
 		}
 	}
 

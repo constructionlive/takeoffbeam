@@ -1,5 +1,12 @@
 # Takeoff Desk
 
+**Built in Rust. Super fast.** Bluebeam-style quantity takeoff with a built-in AI agent.
+
+> ⚡ **Native Rust, no browser, no Electron.** An 859-page, 708 MB drawing set opens in **21 ms**.
+> A full sheet renders in **~50 ms** at 200 DPI, and zoomed regions in **~15 ms**. PDF layers switch
+> in **under 1 ms**. The whole app is a **47 MB** download and uses about **110 MB** of memory with a
+> drawing open.
+
 **Bluebeam-style quantity takeoff with a built-in AI agent.** Open a drawing set, then count,
 measure and mark it up. Ask an agent to do the same on the sheet in front of you: it looks, sets
 the scale, counts symbols, measures runs, reads title blocks, and checks its own work. It runs on

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use takeoff_app::app::TakeoffApp;
 use takeoff_app::settings::Settings;
 use takeoff_app::tools::Tool;
@@ -166,5 +167,47 @@ fn tools_create_takeoff_items() {
 	let saved = takeoff_core::sidecar::load(&copy).unwrap();
 	assert_eq!(saved.marks.len(), 1);
 	assert_eq!(saved.measurements.len(), 1);
+	std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn item_card_toggles_and_menu_opens() {
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui2-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let copy = dir.join("plan.pdf");
+	std::fs::copy(&pdf, &copy).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let ctx = h.ctx.clone();
+	app(&mut h).open(copy.clone(), &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	app(&mut h).debug_doc().unwrap().doc.lock().edit("t", |t| t.categories.push(Category::new("c9", "Area 1", "#4CC2FF", CategoryKind::Area)));
+	app(&mut h).debug_right_tab(0);
+	pump(&mut h, 4);
+
+	// Click the item name: it becomes the active item with the Area tool.
+	let name = h.get_by_label("Area 1").rect().center();
+	click(&mut h, name);
+	assert_eq!(app(&mut h).debug_canvas().tool, Tool::Area, "card activates area tool");
+	assert_eq!(app(&mut h).debug_canvas().active_category.as_deref(), Some("c9"));
+	// Click it again: deselected, back to Select.
+	click(&mut h, name);
+	assert_eq!(app(&mut h).debug_canvas().tool, Tool::Select, "second click deselects");
+	assert_eq!(app(&mut h).debug_canvas().active_category, None);
+
+	// The ⋯ menu button opens its menu (it isn't swallowed by the card).
+	let dots = h.get_by_label(takeoff_app::icons::ELLIPSIS).rect().center();
+	click(&mut h, dots);
+	pump(&mut h, 3);
+	assert!(h.query_by_label_contains("Save to Tool Chest").is_some(), "item menu opened");
+	assert_eq!(app(&mut h).debug_canvas().tool, Tool::Select, "menu click didn't activate the card");
 	std::fs::remove_dir_all(dir).ok();
 }

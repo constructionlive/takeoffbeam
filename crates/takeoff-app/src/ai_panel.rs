@@ -690,18 +690,19 @@ impl AiPanel {
 	}
 
 	fn installed_tab(&mut self, ui: &mut egui::Ui, settings: &mut Settings, p: &Palette) {
-		if self.installed.is_empty() {
-			widgets::empty_state(ui, p, i::HARD_DRIVE, "No local models yet", "Download one in the next tab, or import a .gguf you already have.");
+		if !self.installed.iter().any(|m| m.vision) {
+			widgets::empty_state(ui, p, i::HARD_DRIVE, "No local vision models yet", "Download one in the next tab, or import a .gguf (with its mmproj vision file) you already have.");
 		}
 		let ctx = settings.context_tokens;
 		let cache = Self::cache(settings);
-		for m in self.installed.clone() {
+		// Text-only models can't read drawings, so they aren't offered here.
+		for m in self.installed.clone().into_iter().filter(|m| m.vision) {
 			let fit = self.fits.entry(m.id.clone()).or_insert_with(|| takeoff_models::fit_for(&m, ctx, cache)).clone();
 			widgets::card(ui, p, |ui| {
 				ui.set_width(ui.available_width());
 				ui.label(RichText::new(&m.label).font(theme::semibold(13.0)));
 				let gb = m.size_bytes as f64 / (1u64 << 30) as f64;
-				ui.label(RichText::new(format!("{gb:.1} GB · {}", if m.vision { "sees images" } else { "text only — can't read drawings" })).size(11.5).color(p.text2));
+				ui.label(RichText::new(format!("{gb:.1} GB · reads drawings")).size(11.5).color(p.text2));
 				ui.horizontal(|ui| {
 					widgets::hint(ui, p, &short_fit(&fit)).on_hover_text(fit.summary());
 					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -733,6 +734,10 @@ impl AiPanel {
 				if let Some(model) = rfd::FileDialog::new().add_filter("GGUF model", &["gguf"]).set_title("Choose the model file").pick_file() {
 					let mmproj = rfd::FileDialog::new().add_filter("Vision projector (mmproj)", &["gguf"]).set_title("Optional: choose its vision projector (mmproj)").pick_file();
 					match store::import(&model, mmproj.as_deref()) {
+						Ok(m) if !m.vision => {
+							let _ = store::remove(&m.id);
+							self.live.error = Some("That model can't see images, so it can't read drawings. Import it together with its vision projector (the mmproj .gguf).".into());
+						}
 						Ok(_) => {
 							self.installed = store::installed();
 							self.fits.clear();
