@@ -10,6 +10,7 @@ mod pages;
 mod render;
 mod scale;
 pub mod vision;
+pub mod workspace;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use takeoff_pdf::{Drawing, FracRect};
 
 use crate::{AgentEvent, ProviderConfig};
 
-pub use defs::{definitions, openai_tools};
+pub use defs::{definitions, openai_tools, SHELL_TOOLS};
 
 pub struct ToolDef {
 	pub name: String,
@@ -57,6 +58,8 @@ pub struct ViewImage {
 #[derive(Debug, Clone)]
 pub struct View {
 	pub id: String,
+	/// The drawing it was rendered from.
+	pub drawing: std::path::PathBuf,
 	pub page: u32,
 	pub region: FracRect,
 	pub seen_w: u32,
@@ -64,7 +67,27 @@ pub struct View {
 	pub dialect: Dialect,
 }
 
+/// Another drawing the estimator has open, that the agent can switch to.
+#[derive(Clone)]
+pub struct OtherDrawing {
+	pub path: std::path::PathBuf,
+	pub doc: Arc<Mutex<Document>>,
+	/// The page that drawing's tab is on.
+	pub page: u32,
+}
+
+/// One drawing the tools can work on. The active one's renderer, page and
+/// snap cache live in `ToolCtx` itself; the others wait here.
+struct Slot {
+	path: std::path::PathBuf,
+	doc: Arc<Mutex<Document>>,
+	drawing: Option<Drawing>,
+	page: u32,
+	snap: HashMap<u32, Arc<SnapIndex>>,
+}
+
 pub struct ToolCtx {
+	/// The ACTIVE drawing's takeoff and renderer (see `switch_drawing`).
 	pub doc: Arc<Mutex<Document>>,
 	pub drawing: Drawing,
 	pub model_id: String,
@@ -80,12 +103,18 @@ pub struct ToolCtx {
 	snap: HashMap<u32, Arc<SnapIndex>>,
 	/// Cancellation for long sweeps.
 	pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+	/// The folder `bash` runs in and overlay files live in; None = no shell.
+	pub workspace: Option<std::path::PathBuf>,
+	/// Every drawing the agent can work on; `slots[0]` is the chat's own.
+	slots: Vec<Slot>,
+	active: usize,
 }
 
 const MAX_VIEWS: usize = 64;
 
 impl ToolCtx {
 	pub fn new(doc: Arc<Mutex<Document>>, drawing: Drawing, model_id: &str, llm: Option<ProviderConfig>) -> Self {
+		let main = Slot { path: drawing.path().to_path_buf(), doc: doc.clone(), drawing: None, page: 1, snap: HashMap::new() };
 		Self {
 			doc,
 			drawing,
@@ -98,10 +127,108 @@ impl ToolCtx {
 			next_view: 1,
 			snap: HashMap::new(),
 			cancel: None,
+			workspace: None,
+			slots: vec![main],
+			active: 0,
 		}
 	}
 
+	/// Set the other open drawings (the chat's own stays first). Drawings
+	/// already opened are kept; views of closed ones stop resolving.
+	pub fn set_others(&mut self, others: Vec<OtherDrawing>) -> Result<(), String> {
+		self.switch_to(0)?;
+		let mut old: Vec<Slot> = self.slots.drain(1..).collect();
+		for o in others {
+			if o.path == self.slots[0].path {
+				continue;
+			}
+			let slot = match old.iter().position(|s| s.path == o.path && Arc::ptr_eq(&s.doc, &o.doc)) {
+				Some(i) => {
+					let mut s = old.remove(i);
+					s.page = o.page;
+					s
+				}
+				None => Slot { path: o.path, doc: o.doc, drawing: None, page: o.page, snap: HashMap::new() },
+			};
+			self.slots.push(slot);
+		}
+		let live: Vec<std::path::PathBuf> = self.slots.iter().map(|s| s.path.clone()).collect();
+		self.views.retain(|v| live.contains(&v.drawing));
+		Ok(())
+	}
+
+	/// File names of every drawing, the active one marked.
+	pub fn drawing_names(&self) -> Vec<(String, bool)> {
+		self.slots.iter().enumerate().map(|(i, s)| (file_name(&s.path), i == self.active)).collect()
+	}
+
+	pub fn active_path(&self) -> &std::path::Path {
+		&self.slots[self.active].path
+	}
+
+	/// Point every tool at drawing `i`.
+	fn switch_to(&mut self, i: usize) -> Result<(), String> {
+		if i == self.active {
+			return Ok(());
+		}
+		let incoming = match self.slots[i].drawing.take() {
+			Some(d) => d,
+			None => Drawing::open(&self.slots[i].path).map_err(|e| format!("could not open {}: {e}", self.slots[i].path.display()))?,
+		};
+		let a = self.active;
+		self.slots[a].drawing = Some(std::mem::replace(&mut self.drawing, incoming));
+		self.slots[a].page = self.current_page;
+		self.slots[a].snap = std::mem::take(&mut self.snap);
+		self.doc = self.slots[i].doc.clone();
+		self.current_page = self.slots[i].page;
+		self.snap = std::mem::take(&mut self.slots[i].snap);
+		self.active = i;
+		self.sync_layers(None)
+	}
+
+	/// Switch by file name (with or without .pdf, any case) or 1-based number.
+	pub fn switch_drawing(&mut self, key: &str) -> Result<(), String> {
+		let k = key.trim().to_lowercase();
+		let i = k
+			.parse::<usize>()
+			.ok()
+			.filter(|n| (1..=self.slots.len()).contains(n))
+			.map(|n| n - 1)
+			.or_else(|| self.slots.iter().position(|s| file_name(&s.path).to_lowercase() == k))
+			.or_else(|| self.slots.iter().position(|s| file_name(&s.path).to_lowercase().trim_end_matches(".pdf") == k.trim_end_matches(".pdf")))
+			.or_else(|| {
+				let hits: Vec<usize> = self.slots.iter().enumerate().filter(|(_, s)| file_name(&s.path).to_lowercase().contains(&k)).map(|(i, _)| i).collect();
+				(hits.len() == 1).then(|| hits[0])
+			})
+			.ok_or_else(|| {
+				let names: Vec<String> = self.slots.iter().map(|s| format!("\"{}\"", file_name(&s.path))).collect();
+				format!("no open drawing matches '{key}'. Open: {}", names.join(", "))
+			})?;
+		self.switch_to(i)
+	}
+
+	/// If `args` hand back a view from another drawing, switch to it first,
+	/// so a location always lands in the drawing it was read from.
+	fn follow_views(&mut self, args: &Value) -> Result<(), String> {
+		let Some(obj) = args.as_object() else { return Ok(()) };
+		for key in ["view", "zoom_view", "legend_view"] {
+			let Some(id) = obj.get(key).and_then(Value::as_str) else { continue };
+			let Ok(v) = self.view(id) else { continue };
+			if v.drawing != self.slots[self.active].path {
+				if let Some(i) = self.slots.iter().position(|s| s.path == v.drawing) {
+					self.switch_to(i)?;
+				}
+			}
+			return Ok(());
+		}
+		Ok(())
+	}
+
 	fn emit(&self, e: AgentEvent) {
+		let e = match e {
+			AgentEvent::Viewport { page, region, label, .. } => AgentEvent::Viewport { page, region, label, drawing: Some(self.active_path().to_path_buf()) },
+			e => e,
+		};
 		if let Some(tx) = &self.events {
 			let _ = tx.send(e);
 		}
@@ -112,7 +239,7 @@ impl ToolCtx {
 	}
 
 	fn register_view(&mut self, page: u32, region: FracRect, w: u32, h: u32) -> View {
-		let v = View { id: format!("v{}", self.next_view), page, region, seen_w: w, seen_h: h, dialect: self.dialect };
+		let v = View { id: format!("v{}", self.next_view), drawing: self.active_path().to_path_buf(), page, region, seen_w: w, seen_h: h, dialect: self.dialect };
 		self.next_view += 1;
 		self.views.push(v.clone());
 		if self.views.len() > MAX_VIEWS {
@@ -163,6 +290,10 @@ impl ToolCtx {
 		};
 		self.drawing.set_hidden_layers(&hidden).map_err(|e| e.to_string())
 	}
+}
+
+fn file_name(p: &std::path::Path) -> String {
+	p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 // ── Location conversion (view frame → page fractions) ─────────────────────
@@ -234,6 +365,12 @@ pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, St
 		Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
 		other => other,
 	};
+	if name == "switch_drawing" {
+		let key = args.get("drawing").and_then(|d| d.as_str().map(str::to_string).or_else(|| d.as_u64().map(|n| n.to_string()))).ok_or("switch_drawing needs drawing (a file name or number from get_drawing)")?;
+		ctx.switch_drawing(&key)?;
+		return pages::get_drawing(ctx);
+	}
+	ctx.follow_views(&args)?;
 	match name {
 		"get_drawing" => pages::get_drawing(ctx),
 		"view" => render::view(ctx, parse(name, args)?),
@@ -258,6 +395,9 @@ pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, St
 		"set_hidden_layers" => pages::set_hidden_layers(ctx, parse(name, args)?),
 		"follow_line" => scale::follow_line(ctx, parse(name, args)?),
 		"set_viewport" => pages::set_viewport(ctx, parse(name, args)?),
+		"bash" => workspace::bash(ctx, parse(name, args)?),
+		"add_overlay" => workspace::add_overlay(ctx, parse(name, args)?),
+		"update_overlays" => workspace::update_overlays(ctx, parse(name, args)?),
 		other => Err(format!("unknown tool '{other}'")),
 	}
 }

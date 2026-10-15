@@ -101,7 +101,7 @@ impl Channel {
 
 /// Where CLIs get installed. Apps opened from the Finder / Start menu don't
 /// get the shell's PATH, so look in the usual places too.
-fn search_dirs() -> Vec<PathBuf> {
+pub(crate) fn search_dirs() -> Vec<PathBuf> {
 	let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
 	if let Some(home) = dirs::home_dir() {
 		for d in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin", "bin"] {
@@ -398,6 +398,9 @@ struct Link {
 	sweeps: Option<ProviderConfig>,
 	/// Assistant text streamed since the last tool call (recorded before the call).
 	pending: Arc<Mutex<String>>,
+	/// Where overlay files are read and written.
+	workspace: Option<PathBuf>,
+	others: Vec<tools::OtherDrawing>,
 }
 
 struct Shared {
@@ -473,6 +476,9 @@ fn attach(ctx: &mut ToolCtx, link: &Link, doc: &Mutex<Document>) {
 	ctx.llm = link.sweeps.clone();
 	ctx.model_id = link.model.clone();
 	ctx.dialect = takeoff_core::coords::dialect_for(&link.model);
+	ctx.workspace = link.workspace.clone();
+	// Back on this chat's drawing, with this turn's set of open tabs.
+	let _ = ctx.set_others(link.others.clone());
 	let hidden: HashSet<String> = doc.lock().data.hidden_layers.iter().cloned().collect();
 	let _ = ctx.drawing.set_hidden_layers(&hidden);
 }
@@ -516,7 +522,12 @@ impl Shared {
 
 	fn list(&self) -> Value {
 		let sweeps = self.link.lock().as_ref().is_some_and(|l| l.sweeps.is_some());
-		mcp::tool_list(vec![], if sweeps { &[] } else { &SWEEPS })
+		// The CLIs bring their own shell; ours would only duplicate it.
+		let mut skip: Vec<&str> = tools::SHELL_TOOLS.to_vec();
+		if !sweeps {
+			skip.extend(SWEEPS);
+		}
+		mcp::tool_list(vec![], &skip)
 	}
 
 	fn call(&self, name: &str, args: Value) -> Value {
@@ -597,12 +608,27 @@ pub struct ChannelTurn {
 	/// Where the CLI runs (an empty folder of the app's; Claude Code keys its
 	/// sessions by folder, so keep it stable).
 	pub workdir: PathBuf,
+	/// The AI workspace: when set, the CLI runs THERE with its own shell and
+	/// file tools turned on (instead of in `workdir` with none).
+	pub workspace: Option<PathBuf>,
+	/// The estimator's other open drawings.
+	pub others: Vec<tools::OtherDrawing>,
 	/// Model for detect / calibrate / trace, which make their own vision
 	/// calls; None leaves them out of the tool list.
 	pub sweeps: Option<ProviderConfig>,
 	pub current_page: u32,
 	pub visible_region: Option<(f64, f64, f64, f64)>,
 	pub selected_ids: Vec<String>,
+}
+
+/// Claude Code's built-in tools allowed when the workspace is on.
+const CLAUDE_WORKSPACE_TOOLS: &str = "Bash,Read,Write,Edit,Glob,Grep";
+
+impl ChannelTurn {
+	/// Where the CLI runs.
+	fn cwd(&self) -> &Path {
+		self.workspace.as_deref().unwrap_or(&self.workdir)
+	}
 }
 
 pub fn start_turn(host: &ToolHost, session: Arc<Mutex<ChatSession>>, turn: ChannelTurn, user_text: String) -> TurnHandle {
@@ -622,14 +648,19 @@ pub fn start_turn(host: &ToolHost, session: Arc<Mutex<ChatSession>>, turn: Chann
 	TurnHandle { events: rx, cancel }
 }
 
-fn channel_note(channel: Channel, sweeps: bool) -> String {
+fn channel_note(channel: Channel, sweeps: bool, workspace: bool) -> String {
 	let names = match channel {
 		Channel::ClaudeCode => " (here they are named mcp__takeoff__view, mcp__takeoff__add_marks and so on)",
 		Channel::Codex => "",
 	};
 	let mut s = format!(
-		"\n\n# This session\n\nYou are running in {} on the estimator's own subscription. Your drawing tools come from the MCP server \"{SERVER}\"{names}. Use only those tools: no shell, files or web. Each message starts with a [Viewer: …] line saying what the estimator is looking at.",
-		channel.name()
+		"\n\n# This session\n\nYou are running in {} on the estimator's own subscription. Your drawing tools come from the MCP server \"{SERVER}\"{names}. {reach} Each message starts with a [Viewer: …] line saying what the estimator is looking at.",
+		channel.name(),
+		reach = if workspace {
+			"Your own shell and file tools run in the workspace folder (your working directory); use them there, and use the drawing tools for everything on the drawing."
+		} else {
+			"Use only those tools: no shell, files or web."
+		}
 	);
 	if !sweeps {
 		s.push_str(" detect, calibrate and trace are not available in this session (they need a construction.live or local vision model selected in Takeoff Desk): find symbols yourself in zoomed views and place them with add_marks, region by region on busy sheets.");
@@ -671,9 +702,10 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 			return 0;
 		}
 	};
-	let ctx_line = viewer_line(&shared.doc, &drawing, turn.current_page, turn.visible_region, &turn.selected_ids);
+	let other_names: Vec<String> = turn.others.iter().filter_map(|o| o.path.file_name()).map(|f| f.to_string_lossy().into_owned()).collect();
+	let ctx_line = viewer_line(&shared.doc, &drawing, turn.current_page, turn.visible_region, &turn.selected_ids, &other_names);
 	let file = shared.pdf.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-	let system = system_prompt(&file, drawing.page_count(), true) + &channel_note(turn.channel, turn.sweeps.is_some());
+	let system = system_prompt(&file, drawing.page_count(), true, turn.workspace.as_deref()) + &channel_note(turn.channel, turn.sweeps.is_some(), turn.workspace.is_some());
 	drop(drawing);
 	// TAKEOFF_BRIDGE_EXE: a built takeoff-desk to bridge through (tests, dev runs from another binary).
 	let exe = match std::env::var_os("TAKEOFF_BRIDGE_EXE").map(|p| Ok(PathBuf::from(p))).unwrap_or_else(std::env::current_exe) {
@@ -683,7 +715,7 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 			return 0;
 		}
 	};
-	let _ = std::fs::create_dir_all(&turn.workdir);
+	let _ = std::fs::create_dir_all(turn.cwd());
 	session.lock().messages.push(Msg::User { text: user_text.clone(), context: Some(ctx_line.clone()) });
 	let pending = Arc::new(Mutex::new(String::new()));
 	let dialect_model = match (turn.model.as_str(), turn.channel) {
@@ -691,7 +723,7 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 		("", Channel::Codex) => "gpt".to_string(),
 		(m, _) => m.to_string(),
 	};
-	shared.begin(Link { tx: tx.clone(), session: session.clone(), cancel: cancel.clone(), current_page: turn.current_page, model: dialect_model, sweeps: turn.sweeps.clone(), pending: pending.clone() });
+	shared.begin(Link { tx: tx.clone(), session: session.clone(), cancel: cancel.clone(), current_page: turn.current_page, model: dialect_model, sweeps: turn.sweeps.clone(), pending: pending.clone(), workspace: turn.workspace.clone(), others: turn.others.clone() });
 	let bridge = Bridge { exe, addr: addr.to_string(), token: shared.token.clone() };
 	let mut resume = session.lock().external.clone().filter(|e| e.channel == turn.channel.key()).map(|e| e.id);
 	let mut steps = 0;
@@ -735,7 +767,7 @@ fn toml_str(s: &str) -> String {
 
 fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option<&str>) -> Command {
 	let mut c = command(&turn.exe);
-	c.current_dir(&turn.workdir);
+	c.current_dir(turn.cwd());
 	match turn.channel {
 		Channel::ClaudeCode => {
 			let mcp = json!({ "mcpServers": { SERVER: {
@@ -746,10 +778,16 @@ fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option
 			}}});
 			c.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--input-format", "text"]);
 			c.args(["--system-prompt", system]);
-			// No built-in tools (shell, files, web): only the drawing tools, pre-approved.
-			c.args(["--tools", ""]);
 			c.args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"]);
-			c.args(["--allowedTools", &format!("mcp__{SERVER}")]);
+			if turn.workspace.is_some() {
+				// Shell and file tools in the workspace (the working directory), pre-approved with the drawing tools.
+				c.args(["--tools", CLAUDE_WORKSPACE_TOOLS]);
+				c.args(["--allowedTools", &format!("mcp__{SERVER},{CLAUDE_WORKSPACE_TOOLS}")]);
+			} else {
+				// No built-in tools (shell, files, web): only the drawing tools, pre-approved.
+				c.args(["--tools", ""]);
+				c.args(["--allowedTools", &format!("mcp__{SERVER}")]);
+			}
 			c.args(["--permission-mode", "dontAsk"]);
 			if !turn.model.is_empty() {
 				c.args(["--model", &turn.model]);
@@ -762,8 +800,14 @@ fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option
 		}
 		Channel::Codex => {
 			c.arg("exec");
-			c.args(["--json", "--skip-git-repo-check", "-s", "read-only"]);
-			c.arg("-C").arg(&turn.workdir);
+			c.args(["--json", "--skip-git-repo-check"]);
+			if turn.workspace.is_some() {
+				// Codex's own sandbox: writes confined to the workspace; network allowed.
+				c.args(["-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]);
+			} else {
+				c.args(["-s", "read-only"]);
+			}
+			c.arg("-C").arg(turn.cwd());
 			c.args(["-c", "approval_policy=\"never\""]);
 			let key = format!("mcp_servers.{SERVER}");
 			c.args(["-c", &format!("{key}.command={}", toml_str(&bridge.exe.to_string_lossy()))]);

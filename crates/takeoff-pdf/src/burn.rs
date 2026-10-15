@@ -35,11 +35,13 @@ pub struct BurnOptions {
 	pub highlight: HashSet<String>,
 	/// Global stroke scale (1 = tuned for ~150 DPI renders).
 	pub scale: f32,
+	/// Blend the page's overlays in under the markups (the agent's renders; not exports).
+	pub overlays: bool,
 }
 
 impl Default for BurnOptions {
 	fn default() -> Self {
-		Self { marks: true, measurements: true, annotations: true, scales: true, categories: None, badges: true, highlight: HashSet::new(), scale: 1.0 }
+		Self { marks: true, measurements: true, annotations: true, scales: true, categories: None, badges: true, highlight: HashSet::new(), scale: 1.0, overlays: false }
 	}
 }
 
@@ -226,6 +228,9 @@ fn dash_for(style: Option<LineStyle>) -> Option<&'static [f32]> {
 
 /// Draw the takeoff for `page` onto `img`, which shows `region` of the page.
 pub fn burn(img: &mut RgbaImage, region: FracRect, page_size_pt: (f64, f64), data: &TakeoffData, page: u32, opts: &BurnOptions) {
+	if opts.overlays {
+		crate::overlay::composite(img, region, data, page);
+	}
 	let (w, h) = img.dimensions();
 	let Some(mut pix) = Pixmap::new(w, h) else { return };
 	pix.data_mut().copy_from_slice(img.as_raw());

@@ -34,7 +34,8 @@ pub fn get_drawing(ctx: &mut ToolCtx) -> Result<ToolOutput, String> {
 		})
 		.collect();
 	let layers = ctx.drawing.layer_names();
-	let info = json!({
+	let open: Vec<Value> = ctx.drawing_names().into_iter().enumerate().map(|(i, (name, active))| json!({"number": i + 1, "file": name, "active": active})).collect();
+	let mut info = json!({
 		"file": file,
 		"pages": n,
 		"current_page": ctx.current_page,
@@ -44,7 +45,15 @@ pub fn get_drawing(ctx: &mut ToolCtx) -> Result<ToolOutput, String> {
 		"hidden_layers": d.hidden_layers,
 		"annotations": d.annotations.len(),
 		"viewports": d.viewports.iter().map(|v| json!({"page": v.page, "name": v.name})).collect::<Vec<_>>(),
+		"overlays": d.overlays.iter().map(|o| json!({
+			"id": o.id, "page": o.page, "label": o.label, "opacity": o.opacity, "hidden": o.hidden,
+			"kind": if o.svg.is_some() { "svg" } else { "image" },
+			"region": {"x": o.x, "y": o.y, "w": o.w, "h": o.h}
+		})).collect::<Vec<_>>(),
 	});
+	if open.len() > 1 {
+		info["open_drawings"] = Value::Array(open);
+	}
 	let mut text = serde_json::to_string(&info).unwrap_or_default();
 	if n > 400 {
 		text.push_str(&format!("\n(page list truncated to 400 of {n})"));
@@ -173,6 +182,6 @@ pub fn set_viewport(ctx: &mut ToolCtx, a: ViewportArgs) -> Result<ToolOutput, St
 		}
 		None => (ctx.page_or_current(a.page)?, a.region.map(|r| FracRect { x: r.x, y: r.y, w: r.w, h: r.h }).unwrap_or(FracRect::FULL)),
 	};
-	ctx.emit(AgentEvent::Viewport { page, region: (r.x, r.y, r.w, r.h), label: a.label.unwrap_or_else(|| "Working here".into()) });
+	ctx.emit(AgentEvent::Viewport { page, region: (r.x, r.y, r.w, r.h), label: a.label.unwrap_or_else(|| "Working here".into()), drawing: None });
 	Ok(ToolOutput::text("Shown to the user."))
 }

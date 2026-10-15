@@ -35,11 +35,12 @@ pub fn start_turn(session: Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text
 }
 
 fn context_line(ctx: &AgentContext, drawing: &takeoff_pdf::Drawing) -> String {
-	viewer_line(&ctx.doc, drawing, ctx.current_page, ctx.visible_region, &ctx.selected_ids)
+	let others: Vec<String> = ctx.others.iter().filter_map(|o| o.path.file_name()).map(|f| f.to_string_lossy().into_owned()).collect();
+	viewer_line(&ctx.doc, drawing, ctx.current_page, ctx.visible_region, &ctx.selected_ids, &others)
 }
 
 /// What the estimator is looking at, sent (not shown) with each message.
-pub(crate) fn viewer_line(doc: &Mutex<takeoff_core::Document>, drawing: &takeoff_pdf::Drawing, current_page: u32, visible_region: Option<(f64, f64, f64, f64)>, selected_ids: &[String]) -> String {
+pub(crate) fn viewer_line(doc: &Mutex<takeoff_core::Document>, drawing: &takeoff_pdf::Drawing, current_page: u32, visible_region: Option<(f64, f64, f64, f64)>, selected_ids: &[String], others: &[String]) -> String {
 	let n = drawing.page_count();
 	let label = drawing.page_label(current_page).ok().flatten().filter(|l| *l != current_page.to_string());
 	let mut s = format!("[Viewer: page {current_page} of {n}{}", label.map(|l| format!(" ({l})")).unwrap_or_default());
@@ -54,6 +55,10 @@ pub(crate) fn viewer_line(doc: &Mutex<takeoff_core::Document>, drawing: &takeoff
 	}
 	let has_scale = doc.lock().data.scale_for(current_page).is_some();
 	s.push_str(if has_scale { " · page is scaled" } else { " · page has no scale" });
+	if !others.is_empty() {
+		let file = drawing.path().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+		s.push_str(&format!(" · this tab: \"{file}\" · also open: {}", others.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(", ")));
+	}
 	s.push(']');
 	s
 }
@@ -87,16 +92,20 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 	};
 	let ctx_line = context_line(&ctx, &drawing);
 	let file = ctx.pdf_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-	let system = system_prompt(&file, drawing.page_count(), ctx.provider.vision);
+	let system = system_prompt(&file, drawing.page_count(), ctx.provider.vision, ctx.workspace.as_deref());
 	let provider = ctx.provider.clone();
 	let mut tctx = ToolCtx::new(ctx.doc.clone(), drawing, &provider.model, Some(provider.clone()));
 	tctx.events = Some(tx.clone());
 	tctx.current_page = ctx.current_page;
 	tctx.cancel = Some(cancel.clone());
+	tctx.workspace = ctx.workspace.clone();
+	if let Err(e) = tctx.set_others(ctx.others.clone()) {
+		let _ = tx.send(AgentEvent::Error(e));
+	}
 	let hidden: HashSet<String> = ctx.doc.lock().data.hidden_layers.iter().cloned().collect();
 	let _ = tctx.drawing.set_hidden_layers(&hidden);
 	session.lock().messages.push(Msg::User { text: user_text, context: Some(ctx_line) });
-	let tool_defs = openai_tools();
+	let tool_defs = openai_tools(tctx.workspace.is_some());
 	let mut steps = 0;
 	let mut failures_in_a_row = 0;
 	while steps < MAX_STEPS {

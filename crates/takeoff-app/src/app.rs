@@ -156,6 +156,7 @@ impl TakeoffApp {
 			d.update_compare(&ctx);
 		}
 		let active = self.active;
+		self.ai.others = self.docs.iter().filter(|d| d.loaded).map(|d| takeoff_agent::tools::OtherDrawing { path: d.path.clone(), doc: d.doc.clone(), page: d.page }).collect();
 		let doc = self.docs.get_mut(active);
 		self.ai.poll(&ctx, &mut self.canvas, doc, &self.settings);
 		self.shortcuts(&ctx);

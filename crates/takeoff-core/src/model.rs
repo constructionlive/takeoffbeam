@@ -432,6 +432,42 @@ pub struct Annotation {
 	pub meta: ItemMeta,
 }
 
+/// A picture laid over part of a page, semi-transparent: a map, a diagram, a
+/// colour-coded correlation the agent (or a person) drew to show something on
+/// the sheet itself. Not a quantity and not burned into exports.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Overlay {
+	pub id: String,
+	pub page: u32,
+	/// Where it sits, in page fractions (top-left + size).
+	pub x: f64,
+	pub y: f64,
+	pub w: f64,
+	pub h: f64,
+	/// SVG markup, stored inline so the overlay travels with the takeoff.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub svg: Option<String>,
+	/// Or a PNG/JPEG file on disk (absolute path), e.g. an HTML page rendered to an image.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub image: Option<String>,
+	/// 0 = invisible, 1 = opaque.
+	#[serde(default = "default_overlay_opacity")]
+	pub opacity: f64,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub label: Option<String>,
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub hidden: bool,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub source: Option<Source>,
+	#[serde(flatten)]
+	pub meta: ItemMeta,
+}
+
+fn default_overlay_opacity() -> f64 {
+	0.6
+}
+
 /// A region of a page with its own scale (Bluebeam "viewport"): details drawn
 /// at a different scale than the plan on the same sheet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -528,6 +564,8 @@ pub struct TakeoffData {
 	pub annotations: Vec<Annotation>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub viewports: Vec<Viewport>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub overlays: Vec<Overlay>,
 	#[serde(default)]
 	pub display: DisplaySettings,
 }
@@ -548,6 +586,7 @@ impl Default for TakeoffData {
 			layers: vec![],
 			annotations: vec![],
 			viewports: vec![],
+			overlays: vec![],
 			display: DisplaySettings::default(),
 		}
 	}

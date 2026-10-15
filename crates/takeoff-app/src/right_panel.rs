@@ -51,7 +51,64 @@ impl RightPanel {
 			self.scale_card(ui, doc, canvas, p);
 			ui.add_space(10.0);
 			self.items(ui, doc, canvas, settings, p);
+			self.overlays(ui, doc, p);
 		});
+	}
+
+	/// Pictures laid over the sheet (usually by the AI): show/hide, fade, delete.
+	fn overlays(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc, p: &Palette) {
+		let list: Vec<Overlay> = doc.doc.lock().data.overlays.clone();
+		if list.is_empty() {
+			return;
+		}
+		ui.add_space(10.0);
+		widgets::section_label(ui, p, "Overlays");
+		let mut go_to = None;
+		for o in &list {
+			ui.horizontal(|ui| {
+				let (icon, tip) = if o.hidden { (i::EYE_OFF, "Show") } else { (i::EYE, "Hide") };
+				if widgets::icon_button(ui, p, icon, tip, false).clicked() {
+					let id = o.id.clone();
+					doc.doc.lock().edit(if o.hidden { "Show overlay" } else { "Hide overlay" }, |d| {
+						if let Some(o) = d.overlays.iter_mut().find(|x| x.id == id) {
+							o.hidden = !o.hidden;
+						}
+					});
+				}
+				let name = o.label.clone().unwrap_or_else(|| "Overlay".into());
+				let here = o.page == doc.page;
+				let text = RichText::new(format!("{name} · p{}", o.page)).size(12.5).color(if here { p.text } else { p.text2 });
+				if ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click())).on_hover_text(if here { "On this page" } else { "Go to its page" }).clicked() && !here {
+					go_to = Some(o.page);
+				}
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					if widgets::icon_button(ui, p, i::TRASH_2, "Delete overlay", false).clicked() {
+						let id = o.id.clone();
+						doc.doc.lock().edit("Delete overlay", |d| d.overlays.retain(|x| x.id != id));
+					}
+					let mut op = o.opacity as f32;
+					let r = ui.add(egui::Slider::new(&mut op, 0.05..=1.0).show_value(false)).on_hover_text(format!("Opacity {:.0}%", op * 100.0));
+					// One undo step per drag.
+					if r.drag_started() {
+						doc.doc.lock().begin_gesture("Overlay opacity");
+					}
+					if r.changed() {
+						let id = o.id.clone();
+						doc.doc.lock().edit("Overlay opacity", |d| {
+							if let Some(o) = d.overlays.iter_mut().find(|x| x.id == id) {
+								o.opacity = op as f64;
+							}
+						});
+					}
+					if r.drag_stopped() {
+						doc.doc.lock().end_gesture();
+					}
+				});
+			});
+		}
+		if let Some(pg) = go_to {
+			doc.go_to_page(pg);
+		}
 	}
 
 	fn scale_card(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc, canvas: &mut Canvas, p: &Palette) {

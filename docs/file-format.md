@@ -43,6 +43,11 @@ render time.
     "style": { "stroke": "#E8531A", "fill": null, "width": 1.5, "opacity": 1, "fontSize": 10, "lineStyle": null },
     "subject": "Callout", "review": "Accepted"
   }],
+  "overlays": [{
+    "id": "ov_…", "page": 1, "x": 0.5, "y": 0, "w": 0.5, "h": 1,  // page fractions
+    "svg": "<svg …>…</svg>",           // or "image": "/abs/path/zones.png"
+    "opacity": 0.6, "label": "Pour zones", "hidden": false, "source": "ai"
+  }],
   "customFields": [{ "id": "f_…", "name": "Phase" }],
   "hiddenLayers": ["E-LIGHTING"],
   "layers": [{ "name": "E-LIGHTING", "description": "lighting fixtures and circuits" }],

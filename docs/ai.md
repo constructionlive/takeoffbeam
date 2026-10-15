@@ -20,8 +20,10 @@ It sees the sheet the way you do: same layers, same markups, numbered badges inc
 - **Its edits are undoable.** Every edit is an ordinary step in the undo history.
 - **You can watch it.** While it works, an orange box on the canvas shows where it is looking.
   The chat shows each step (view, add marks, set scale…), with thumbnails of what it saw.
-- **It only touches this drawing.** It has no file system, shell or web access. Its only tools are
-  the drawing tools below.
+- **It works on this drawing, plus one folder of its own.** Besides the drawing tools below, it
+  gets a shell in its **workspace folder** (default `Documents/Takeoff Desk/Workspace`) for
+  scripts, data and overlay files. Turn that off, or pick another folder, in *Models* → *Let the AI
+  run commands in a workspace folder*. Commands run as you, on this computer.
 - **Stop** ends the run at the next step.
 
 The prompt line knows your context: the current page, the visible region when you are zoomed in,
@@ -97,6 +99,32 @@ reads positions off a numbered **view** (`v3`) and the tools convert them.
 | `set_hidden_layers` | Layer visibility (shared with you) |
 | `follow_line` | Measure a whole connected run from one point |
 | `set_viewport` | Show where it's looking |
+| `switch_drawing` | Move its tools to another open drawing (tab) |
+| `add_overlay` / `update_overlays` | Lay an SVG, image or HTML page over part of the sheet, semi-transparent |
+| `bash` | Run a command in the workspace folder (bash; PowerShell on Windows) |
+
+### Several drawings at once
+
+Open several PDFs (*File → Open* takes many at once, or drop them on the window). The chat belongs
+to the tab you're in, and the AI can also work in every other open tab. A chip above the prompt
+shows how many. For example: "compare the panel schedule on E-601 with the plan", or "carry the
+scale from the architectural set to the structural one". Each drawing keeps its own takeoff. A mark
+the AI places always lands in the drawing it was looking at, and appears in that tab, undoable as
+usual.
+
+### Workspace and overlays
+
+With the workspace on, the agent can run commands (python, node, curl… whatever is installed) in
+its folder. `TAKEOFF_PDF` holds the drawing's path, and files stay between turns. Commands start in
+the workspace, but they run as you with your permissions. Codex is the exception: its own sandbox
+confines writes to the folder.
+
+Overlays let it **show** things on the sheet itself: zones, a site map, a heat map of quantities,
+a colour-coded correlation between sheets. Each one is an SVG, a PNG/JPEG, or an HTML page. HTML
+is rendered to a transparent image with Google Chrome or Microsoft Edge, which must be installed.
+Overlays sit under your markups. Show or hide them, change their opacity or delete them under
+**Overlays** in the Takeoff tab. They are saved with the takeoff but not in exports. Overlays
+made from image or HTML files point at the file in the workspace, so keep it there.
 
 The same tools are available to other AI apps through the [MCP server](cli.md#mcp).
 
@@ -121,9 +149,11 @@ If you already pay for Claude or ChatGPT, *Models → Subscriptions* runs the ag
 Code or Codex CLI installed on your computer, under the sign-in you already have. Takeoff Desk
 never sees or stores your credentials.
 
-- The CLI runs headless in an empty folder of ours, with only the drawing tools allowed (no shell,
-  no file edits). The tools come from the app over a private local MCP bridge, so marks appear
-  live and are undoable like any other.
+- The CLI runs headless in your AI workspace folder, with its own shell and file tools (Claude
+  Code: Bash, Read, Write, Edit, Glob, Grep; Codex: its workspace-write sandbox). With the workspace
+  turned off, it runs in an empty folder of ours with only the drawing tools. The drawing tools
+  come from the app over a private local MCP bridge, so marks appear live and are undoable like any
+  other.
 - Usage counts against your plan's limits, not construction.live credits.
 - Codex is found even when it only ships inside the ChatGPT desktop app. Sign in once with
   `codex login`.

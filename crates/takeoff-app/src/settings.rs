@@ -42,6 +42,10 @@ pub struct Settings {
 	pub onboarded: bool,
 	/// "Skip this version" for update notices.
 	pub skipped_update: String,
+	/// Let the AI run shell commands and keep files in one folder.
+	pub ai_workspace_on: bool,
+	/// That folder; empty = [`default_workspace`].
+	pub ai_workspace: String,
 }
 
 impl Default for Settings {
@@ -68,12 +72,29 @@ impl Default for Settings {
 			markups_list: true,
 			onboarded: false,
 			skipped_update: String::new(),
+			ai_workspace_on: true,
+			ai_workspace: String::new(),
 		}
 	}
 }
 
 fn whoami() -> String {
 	std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "Me".into())
+}
+
+/// Where the AI's workspace is unless the person picks another folder.
+pub fn default_workspace() -> PathBuf {
+	dirs::document_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir).join("Takeoff Desk").join("Workspace")
+}
+
+impl Settings {
+	/// The AI's workspace folder, or None when it is turned off.
+	pub fn workspace(&self) -> Option<PathBuf> {
+		if !self.ai_workspace_on {
+			return None;
+		}
+		Some(if self.ai_workspace.trim().is_empty() { default_workspace() } else { PathBuf::from(self.ai_workspace.trim()) })
+	}
 }
 
 pub fn config_dir() -> PathBuf {

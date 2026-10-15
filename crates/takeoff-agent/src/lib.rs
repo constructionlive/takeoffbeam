@@ -46,6 +46,10 @@ pub struct AgentContext {
 	pub visible_region: Option<(f64, f64, f64, f64)>,
 	pub selected_ids: Vec<String>,
 	pub provider: ProviderConfig,
+	/// The agent's workspace folder (bash runs there); None = no shell.
+	pub workspace: Option<PathBuf>,
+	/// The estimator's other open drawings, which the agent can switch to.
+	pub others: Vec<tools::OtherDrawing>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +59,8 @@ pub enum AgentEvent {
 	ToolStarted { call_id: String, name: String, args: serde_json::Value },
 	ToolFinished { call_id: String, name: String, ok: bool, summary: String, image: Option<image::RgbaImage> },
 	/// Where the agent is looking or working (page fractions) — the viewer's ghost frame.
-	Viewport { page: u32, region: (f64, f64, f64, f64), label: String },
+	/// `drawing`: which open drawing (None = the chat's own).
+	Viewport { page: u32, region: (f64, f64, f64, f64), label: String, drawing: Option<PathBuf> },
 	/// The takeoff changed (repaint, refresh lists).
 	DocChanged,
 	Usage { prompt_tokens: u64, completion_tokens: u64 },

@@ -55,6 +55,8 @@ pub struct Canvas {
 	pub requests: Vec<CanvasRequest>,
 	pub cursor_page: Option<Point>,
 	pub show_badges: bool,
+	/// Rasterized overlays by id: (content key, texture or why it failed).
+	overlay_tex: HashMap<String, (u64, Result<egui::TextureHandle, String>)>,
 }
 
 impl Default for Canvas {
@@ -78,6 +80,7 @@ impl Default for Canvas {
 			requests: vec![],
 			cursor_page: None,
 			show_badges: true,
+			overlay_tex: HashMap::new(),
 		}
 	}
 }
@@ -185,6 +188,7 @@ impl Canvas {
 
 		self.navigate(ui, &resp, doc, wheel_zooms);
 		self.paint_page(&painter, doc, p);
+		self.paint_sheet_overlays(&ctx, &painter, doc, p);
 		self.page_spinner(ui, doc, p);
 		self.paint_items(&painter, doc, p);
 		self.paint_overlays(&painter, doc, p);
@@ -274,6 +278,42 @@ impl Canvas {
 				}
 			}
 		}
+	}
+
+	/// Overlays (SVG / images the AI or a person laid over the sheet), between
+	/// the page and the takeoff so marks stay on top.
+	fn paint_sheet_overlays(&mut self, ctx: &egui::Context, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
+		let overlays: Vec<Overlay> = doc.doc.lock().data.overlays.iter().filter(|o| o.page == doc.page && !o.hidden).cloned().collect();
+		for o in &overlays {
+			let r = Rect::from_min_max(doc.to_screen(Point { x: o.x, y: o.y }), doc.to_screen(Point { x: o.x + o.w, y: o.y + o.h }));
+			if !r.is_positive() {
+				continue;
+			}
+			let key = overlay_key(o);
+			let stale = self.overlay_tex.get(&o.id).is_none_or(|(k, _)| *k != key);
+			if stale {
+				// Raster at a fixed long edge (re-rasterizing per zoom step would stall panning).
+				let s = 2048.0 / r.width().max(r.height());
+				let (w, h) = ((r.width() * s).round() as u32, (r.height() * s).round() as u32);
+				let tex = takeoff_pdf::overlay::rasterize(o, w, h).map(|img| {
+					let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+					ctx.load_texture(format!("overlay-{}", o.id), ci, egui::TextureOptions::LINEAR)
+				});
+				self.overlay_tex.insert(o.id.clone(), (key, tex));
+			}
+			match &self.overlay_tex[&o.id].1 {
+				Ok(t) => {
+					painter.image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE.gamma_multiply(o.opacity.clamp(0.0, 1.0) as f32));
+				}
+				Err(e) => {
+					painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.danger), StrokeKind::Inside);
+					painter.text(r.left_top() + Vec2::new(6.0, 6.0), Align2::LEFT_TOP, format!("Overlay {}: {e}", o.label.as_deref().unwrap_or(&o.id)), theme::medium(11.0), p.danger);
+				}
+			}
+		}
+		// Drop textures of overlays that are gone (deleted, other page).
+		let live: HashSet<&str> = overlays.iter().map(|o| o.id.as_str()).collect();
+		self.overlay_tex.retain(|id, _| live.contains(id.as_str()));
 	}
 
 	fn paint_items(&mut self, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
@@ -1436,6 +1476,18 @@ impl Canvas {
 }
 
 // ── Painting helpers ────────────────────────────────────────────────────
+
+/// Changes when the overlay's picture does (not its opacity or position).
+fn overlay_key(o: &Overlay) -> u64 {
+	use std::hash::{Hash, Hasher};
+	let mut h = std::collections::hash_map::DefaultHasher::new();
+	o.svg.hash(&mut h);
+	o.image.hash(&mut h);
+	if let Some(m) = o.image.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok()) {
+		m.hash(&mut h);
+	}
+	h.finish()
+}
 
 fn bbox(pts: &[Pos2]) -> Option<Rect> {
 	let first = *pts.first()?;

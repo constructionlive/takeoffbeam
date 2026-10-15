@@ -36,6 +36,7 @@ pub struct ViewArgs {
 	pub show_marks: Option<bool>,
 	pub show_measurements: Option<bool>,
 	pub show_annotations: Option<bool>,
+	pub show_overlays: Option<bool>,
 	/// Hide these PDF layers for this render only.
 	pub hidden_layers: Option<Vec<String>>,
 	pub max_px: Option<u32>,
@@ -87,10 +88,19 @@ pub(crate) fn render_view(ctx: &mut ToolCtx, spec: RenderSpec) -> Result<(ViewIm
 		img.height(),
 		view.dialect.reading_rule(img.width(), img.height()),
 	);
+	// With several drawings open, say which one this is.
+	let names = ctx.drawing_names();
+	let caption = if names.len() > 1 {
+		let active = names.iter().find(|n| n.1).map(|n| n.0.clone()).unwrap_or_default();
+		format!("[{active}] {caption}")
+	} else {
+		caption
+	};
 	ctx.emit(AgentEvent::Viewport {
 		page: spec.page,
 		region: (r.region.x, r.region.y, r.region.w, r.region.h),
 		label: format!("Looking at {}", view.id),
+		drawing: None,
 	});
 	Ok((ViewImage { png, width: img.width(), height: img.height(), view_id: view.id.clone(), caption }, view))
 }
@@ -170,6 +180,7 @@ pub fn view(ctx: &mut ToolCtx, a: ViewArgs) -> Result<ToolOutput, String> {
 		marks: a.show_marks.unwrap_or(true),
 		measurements: a.show_measurements.unwrap_or(true),
 		annotations: a.show_annotations.unwrap_or(true),
+		overlays: a.show_overlays.unwrap_or(true),
 		categories: cats.clone(),
 		..Default::default()
 	};
@@ -242,14 +253,19 @@ pub(crate) fn evidence(ctx: &mut ToolCtx, page: u32, ids: &[String], what: &str)
 						pts.extend_from_slice(&a.points);
 					}
 				}
-				None => {}
+				None => {
+					if let Some(o) = doc.data.overlays.iter().find(|o| &o.id == id) {
+						pts.push(Point { x: o.x, y: o.y });
+						pts.push(Point { x: o.x + o.w, y: o.y + o.h });
+					}
+				}
 			}
 		}
 		takeoff_core::geometry::bounds(&pts)?
 	};
 	let pad = (bbox.2.max(bbox.3) * 0.5).max(0.03);
 	let region = FracRect { x: bbox.0 - pad, y: bbox.1 - pad, w: bbox.2 + 2.0 * pad, h: bbox.3 + 2.0 * pad };
-	let burn = BurnOptions { highlight: ids.iter().cloned().collect(), ..Default::default() };
+	let burn = BurnOptions { highlight: ids.iter().cloned().collect(), overlays: true, ..Default::default() };
 	let (mut img, _) = render_view(ctx, RenderSpec { page, region, burn, preferred_max: 1200, hidden_override: None }).ok()?;
 	img.caption = format!("Check render after {what} (changed items drawn bold). {}", img.caption);
 	Some(img)

@@ -36,6 +36,8 @@ fn live_turn(ch: &Channel) -> ChannelTurn {
 		exe: channel::find_exe(*ch).expect("CLI not installed"),
 		model: std::env::var("TAKEOFF_LIVE_MODEL").unwrap_or_else(|_| if *ch == Channel::ClaudeCode { "haiku".into() } else { String::new() }),
 		workdir: std::env::temp_dir().join("takeoff-channel-live"),
+		workspace: std::env::var_os("TAKEOFF_LIVE_WORKSPACE").map(std::path::PathBuf::from),
+		others: vec![],
 		sweeps: None,
 		current_page: 1,
 		visible_region: None,
@@ -102,5 +104,49 @@ fn marks_squares_through_the_cli() {
 	println!("second turn: {answer}");
 	assert!(answer.contains("Squares"), "did not resume: {answer}");
 	assert_eq!(session.lock().external.as_ref(), Some(&thread));
+	std::fs::remove_file(pdf).ok();
+}
+
+/// With the workspace on, the CLI's own shell writes a file there and the
+/// drawing tools lay an overlay on the sheet.
+#[test]
+#[ignore]
+fn shell_and_overlay_through_the_cli() {
+	let ch = match std::env::var("TAKEOFF_LIVE_CHANNEL").as_deref() {
+		Ok("codex") => Channel::Codex,
+		_ => Channel::ClaudeCode,
+	};
+	assert!(std::env::var_os("TAKEOFF_BRIDGE_EXE").is_some(), "set TAKEOFF_BRIDGE_EXE to a built takeoff-desk");
+	let ws = std::env::temp_dir().join(format!("takeoff-live-ws-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&ws);
+	std::fs::create_dir_all(&ws).unwrap();
+	let pdf = fixture();
+	let doc = Arc::new(Mutex::new(Document::new(TakeoffData::default(), vec![(792.0, 612.0)], "AI")));
+	let host = ToolHost::start(doc.clone(), pdf.clone()).unwrap();
+	let session = Arc::new(Mutex::new(ChatSession::new()));
+	let turn = ChannelTurn { exe: channel::find_exe(ch).expect("CLI installed"), workspace: Some(ws.clone()), ..live_turn(&ch) };
+	let h = channel::start_turn(
+		&host,
+		session,
+		turn,
+		"Two steps. 1) Use your shell to write the text 42 into a file named answer.txt in your working directory. 2) Add an overlay over the whole of page 1: an SVG with viewBox 0 0 4 3 containing one red circle, label it \"Test\". Then reply done.".into(),
+	);
+	let mut errors = vec![];
+	loop {
+		match h.events.recv_timeout(Duration::from_secs(600)).expect("turn timed out") {
+			AgentEvent::TextDelta(t) => print!("{t}"),
+			AgentEvent::ToolStarted { name, args, .. } => println!("\n→ {name} {args}"),
+			AgentEvent::ToolFinished { name, ok, summary, .. } => println!("← {name} ok={ok} {summary}"),
+			AgentEvent::Error(e) => errors.push(e),
+			AgentEvent::Done { .. } => break,
+			_ => {}
+		}
+	}
+	assert!(errors.is_empty(), "errors: {errors:?}");
+	let answer = std::fs::read_to_string(ws.join("answer.txt")).expect("shell wrote answer.txt in the workspace");
+	assert_eq!(answer.trim(), "42");
+	let d = doc.lock();
+	assert_eq!(d.data.overlays.len(), 1, "one overlay added");
+	assert_eq!(d.data.overlays[0].label.as_deref(), Some("Test"));
 	std::fs::remove_file(pdf).ok();
 }

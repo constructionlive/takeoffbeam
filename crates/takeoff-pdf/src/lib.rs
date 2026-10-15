@@ -11,6 +11,7 @@ pub mod export;
 pub mod layers;
 pub mod ops;
 pub mod outline;
+pub mod overlay;
 pub mod search;
 pub mod tools;
 pub mod vectors;

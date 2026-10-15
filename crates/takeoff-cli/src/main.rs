@@ -356,7 +356,7 @@ fn agent(pdf: PathBuf, prompt: String, page: u32, base_url: Option<String>, api_
 	let data = sidecar::load(&pdf).map_err(|e| e.to_string())?;
 	let doc = std::sync::Arc::new(parking_lot::Mutex::new(takeoff_core::Document::new(data, sizes, "AI")));
 	let session = std::sync::Arc::new(parking_lot::Mutex::new(takeoff_agent::ChatSession::new()));
-	let ctx = takeoff_agent::AgentContext { doc: doc.clone(), pdf_path: pdf.clone(), current_page: page, visible_region: None, selected_ids: vec![], provider };
+	let ctx = takeoff_agent::AgentContext { doc: doc.clone(), pdf_path: pdf.clone(), current_page: page, visible_region: None, selected_ids: vec![], provider, workspace: None, others: vec![] };
 	let turn = takeoff_agent::start_turn(session, ctx, prompt);
 	for ev in turn.events.iter() {
 		use takeoff_agent::AgentEvent::*;

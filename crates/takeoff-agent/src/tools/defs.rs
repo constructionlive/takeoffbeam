@@ -34,7 +34,9 @@ fn def(name: &str, description: &str, properties: Value, required: &[&str]) -> T
 
 pub fn definitions() -> Vec<ToolDef> {
 	vec![
-		def("get_drawing", "Overview of the loaded drawing: pages (labels, paper sizes, scale set or not, item counts), takeoff items (categories) with counts, PDF layers and which are hidden.", json!({}), &[]),
+		def("get_drawing", "Overview of the active drawing: pages (labels, paper sizes, scale set or not, item counts), takeoff items (categories) with counts, PDF layers and which are hidden, overlays, and the other open drawings.", json!({}), &[]),
+		def("switch_drawing", "Point every tool at another open drawing (the estimator's other tabs): by file name or number from get_drawing. Each drawing has its own pages, scales and takeoff. Locations read off a view always go to the drawing that view came from, so you only need this before page-based calls (view by page, read_text, search_text, summary, detect…). Returns that drawing's overview.", json!({
+			"drawing": {"type": "string", "description": "File name (or part of it) or number."}}), &["drawing"]),
 		def(
 			"view",
 			"Render part of a page with the takeoff drawn on it (numbered badges per item) and look at it. Returns the image with a view id; every location you hand back to other tools is read off a view and passed with its id. Whole sheets are unreadable at full-page scale: zoom with region (page fractions, coarse) or zoom_view + zoom_box (a box read off an earlier view, precise).",
@@ -143,13 +145,41 @@ pub fn definitions() -> Vec<ToolDef> {
 			"view": view_id(), "point": pt(), "add_to": {"type": "string", "description": "Category to save the run in."}, "label": {"type": "string"}}), &["view", "point"]),
 		def("set_viewport", "Show the user where you are working (their viewer highlights it).", json!({
 			"view": view_id(), "page": {"type": "integer"}, "region": region(), "label": {"type": "string"}}), &[]),
+		def(
+			"add_overlay",
+			"Lay a picture over part of a page, semi-transparent, to SHOW something on the sheet: a map, zones, a heat map, a diagram, a colour-coded correlation, a legend. Give exactly one source: svg (markup; it is stretched to fill the box, so set its viewBox to the box's shape), html (markup, rendered to a transparent image with headless Chrome/Edge), or file (a .svg/.png/.jpg/.html in the workspace). Place it with view + box (read off that view) or page + region (page fractions; default the whole page). Not a quantity: overlays never change counts or measurements. Attaches a check render.",
+			json!({
+				"view": view_id(), "box": bx(), "page": {"type": "integer"}, "region": region(),
+				"svg": {"type": "string", "description": "SVG markup."},
+				"html": {"type": "string", "description": "HTML markup (transparent background unless it sets one)."},
+				"file": {"type": "string", "description": "Path in the workspace (relative) or absolute."},
+				"opacity": {"type": "number", "description": "0.05-1, default 0.6."},
+				"label": {"type": "string", "description": "Short name the estimator sees in the overlay list."},
+				"width_px": {"type": "integer", "description": "HTML only: long edge to render at (default 1600)."}
+			}),
+			&[],
+		),
+		def("update_overlays", "Change or remove overlays by id (get_drawing lists them): opacity, hidden, label, delete.", json!({
+			"items": {"type": "array", "items": {"type": "object", "properties": {
+				"id": {"type": "string"}, "opacity": {"type": "number"}, "hidden": {"type": "boolean"}, "label": {"type": "string"}, "delete": {"type": "boolean"}
+			}, "required": ["id"]}}}), &["items"]),
+		def(
+			"bash",
+			"Run a shell command (bash; PowerShell on Windows) in your workspace folder, which persists between calls and turns. Use it to compute, convert, script (python, node…), fetch data, and write files you then overlay. Environment: TAKEOFF_PDF (the drawing's path, read-only use), TAKEOFF_WORKSPACE, TAKEOFF_PAGE. Default timeout 120s (max 600). Returns exit code, stdout and stderr (long output keeps its end).",
+			json!({"command": {"type": "string"}, "timeout_secs": {"type": "integer"}}),
+			&["command"],
+		),
 	]
 }
 
-/// OpenAI `tools` array.
-pub fn openai_tools() -> Vec<Value> {
+/// Tools that need the workspace folder (left out when it is off).
+pub const SHELL_TOOLS: &[&str] = &["bash"];
+
+/// OpenAI `tools` array; `shell` = the workspace tools are available.
+pub fn openai_tools(shell: bool) -> Vec<Value> {
 	definitions()
 		.into_iter()
+		.filter(|d| shell || !SHELL_TOOLS.contains(&d.name.as_str()))
 		.map(|d| json!({"type": "function", "function": {"name": d.name, "description": d.description, "parameters": d.parameters}}))
 		.collect()
 }

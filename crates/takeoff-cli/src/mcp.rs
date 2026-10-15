@@ -91,7 +91,7 @@ pub fn serve(pdf: Option<PathBuf>) -> Result<(), String> {
 				continue;
 			}
 		};
-		let Some(reply) = mcp::reply(&msg, || mcp::tool_list(vec![open_drawing_tool()], &[]), |name, args| call(&mut s, name, args)) else { continue }; // notifications (initialized, cancelled…)
+		let Some(reply) = mcp::reply(&msg, || mcp::tool_list(vec![open_drawing_tool()], takeoff_agent::tools::SHELL_TOOLS), |name, args| call(&mut s, name, args)) else { continue }; // notifications (initialized, cancelled…)
 		writeln!(stdout, "{reply}").map_err(|e| e.to_string())?;
 		stdout.flush().map_err(|e| e.to_string())?;
 	}

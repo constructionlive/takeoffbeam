@@ -250,7 +250,7 @@ pub fn detect(ctx: &mut ToolCtx, a: DetectArgs) -> Result<ToolOutput, String> {
 		}
 		None => None,
 	};
-	ctx.emit(AgentEvent::Viewport { page, region: (scope.x, scope.y, scope.w, scope.h), label: format!("Sweeping for {}", targets.iter().map(|t| t.0.as_str()).collect::<Vec<_>>().join(", ")) });
+	ctx.emit(AgentEvent::Viewport { page, region: (scope.x, scope.y, scope.w, scope.h), label: format!("Sweeping for {}", targets.iter().map(|t| t.0.as_str()).collect::<Vec<_>>().join(", ")), drawing: None });
 	let tiles = tiles(ctx, page, scope, DETECT_DPI, TILE_PX, TILE_STRIDE, MAX_TILES)?;
 	if a.hidden_layers.is_some() {
 		ctx.sync_layers(None)?;
@@ -558,7 +558,7 @@ pub fn calibrate(ctx: &mut ToolCtx, a: CalibrateArgs) -> Result<ToolOutput, Stri
 	}
 	ctx.sync_layers(a.hidden_layers.as_deref())?;
 	let (w_pt, h_pt) = ctx.doc.lock().page_size_pt(page);
-	ctx.emit(AgentEvent::Viewport { page, region: (0.0, 0.0, 1.0, 1.0), label: "Reading dimensions".into() });
+	ctx.emit(AgentEvent::Viewport { page, region: (0.0, 0.0, 1.0, 1.0), label: "Reading dimensions".into(), drawing: None });
 	let dialect = ctx.vision_dialect();
 	// Stage A: dimension texts. The PDF text layer first (free and exact),
 	// then a vision tile sweep when the sheet has no usable text.
@@ -779,7 +779,7 @@ pub fn trace(ctx: &mut ToolCtx, a: TraceArgs) -> Result<ToolOutput, String> {
 	};
 	let (page, scope) = scope_of(ctx, a.page, a.region.as_ref(), a.view.as_ref(), a.bbox.as_ref())?;
 	ctx.sync_layers(a.hidden_layers.as_deref())?;
-	ctx.emit(AgentEvent::Viewport { page, region: (scope.x, scope.y, scope.w, scope.h), label: format!("Tracing {}", a.target) });
+	ctx.emit(AgentEvent::Viewport { page, region: (scope.x, scope.y, scope.w, scope.h), label: format!("Tracing {}", a.target), drawing: None });
 	let ts = tiles(ctx, page, scope, 150.0, 1600.0, 800.0, 24)?;
 	if a.hidden_layers.is_some() {
 		ctx.sync_layers(None)?;

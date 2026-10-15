@@ -37,7 +37,8 @@ These links always point at the newest version.
   - Compare revisions, layers, text search and bookmarks.
   - Flattened marked-up PDF export.
 - **AI agent:**
-  - Drawing tools only: no file system, no shell. You review everything it adds.
+  - Drawing tools, plus a shell in one workspace folder you choose (or turn off). Overlays of
+    SVG, images or HTML on the sheet. You review everything it adds.
   - Local models through llama.cpp, with a memory check before loading. Cloud models through
     construction.live. Your own **Claude Code or Codex** subscription. Or any OpenAI-compatible
     endpoint.

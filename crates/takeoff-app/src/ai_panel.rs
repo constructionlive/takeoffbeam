@@ -77,6 +77,8 @@ enum CloudFlow {
 }
 
 pub struct AiPanel {
+	/// The other open tabs, set by the app each frame; the agent can switch to them.
+	pub others: Vec<takeoff_agent::tools::OtherDrawing>,
 	sessions: HashMap<PathBuf, Arc<Mutex<ChatSession>>>,
 	turn: Option<TurnHandle>,
 	turn_doc: Option<PathBuf>,
@@ -109,6 +111,7 @@ impl AiPanel {
 	pub fn new() -> Self {
 		let cloud = takeoff_cloud::token::load();
 		let mut s = Self {
+			others: Vec::new(),
 			sessions: HashMap::new(),
 			turn: None,
 			turn_doc: None,
@@ -380,6 +383,8 @@ impl AiPanel {
 					visible_region: visible_region(doc),
 					selected_ids: doc.selection.iter().cloned().collect(),
 					provider,
+					workspace: settings.workspace(),
+					others: self.others.iter().filter(|o| o.path != doc.path).cloned().collect(),
 				};
 				let transcript_len = session.lock().transcript().len();
 				self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), ..Default::default() };
@@ -410,6 +415,8 @@ impl AiPanel {
 			exe,
 			model,
 			workdir: channel_workdir(),
+			workspace: settings.workspace(),
+			others: self.others.iter().filter(|o| o.path != doc.path).cloned().collect(),
 			sweeps,
 			current_page: doc.page,
 			visible_region: visible_region(doc),
@@ -510,7 +517,13 @@ impl AiPanel {
 						self.live.steps.push(Step { call_id, name, summary, ok: Some(ok), thumb });
 					}
 				}
-				AgentEvent::Viewport { page, region, label } => canvas.ghost = Some((page, region, label, Instant::now())),
+				AgentEvent::Viewport { page, region, label, drawing } => {
+					// Only on the drawing it is working in (it may be in another tab).
+					let here = doc.as_deref().map(|d| d.path.clone());
+					if drawing.is_none() || drawing == here {
+						canvas.ghost = Some((page, region, label, Instant::now()));
+					}
+				}
 				AgentEvent::DocChanged => {}
 				AgentEvent::Usage { prompt_tokens, completion_tokens } => {
 					self.usage.0 += prompt_tokens;
@@ -721,6 +734,11 @@ impl AiPanel {
 			chip(ui, p, &format!("{} {}", i::FILE_TEXT, doc.page_label(doc.page)));
 			if sel > 0 {
 				chip(ui, p, &format!("{} {sel} selected", i::MOUSE_POINTER_2));
+			}
+			let others: Vec<String> = self.others.iter().filter(|o| o.path != doc.path).filter_map(|o| o.path.file_name()).map(|f| f.to_string_lossy().into_owned()).collect();
+			if !others.is_empty() {
+				chip(ui, p, &format!("{} +{} open drawing{}", i::FILES, others.len(), if others.len() == 1 { "" } else { "s" }))
+					.on_hover_text(format!("The AI can also work in:\n{}", others.join("\n")));
 			}
 		});
 		let frame = egui::Frame::new().fill(p.card).stroke(egui::Stroke::new(1.0, p.border)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8));
@@ -942,6 +960,7 @@ impl AiPanel {
 						settings.save();
 					}
 				});
+				self.workspace_row(ui, settings, p);
 				ui.add_space(6.0);
 				ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match self.models_tab {
 					0 => self.installed_tab(ui, settings, p),
@@ -954,6 +973,36 @@ impl AiPanel {
 		if !open {
 			self.models_open = false;
 		}
+	}
+
+	/// The AI's shell + files folder: on/off, which folder, open it.
+	fn workspace_row(&mut self, ui: &mut egui::Ui, settings: &mut Settings, p: &Palette) {
+		ui.horizontal_wrapped(|ui| {
+			if ui
+				.checkbox(&mut settings.ai_workspace_on, "Let the AI run commands in a workspace folder")
+				.on_hover_text("The AI gets a shell (bash / PowerShell) and file tools that start in this folder, for scripts, data and overlay files. Commands run as you, on this computer.")
+				.changed()
+			{
+				settings.save();
+			}
+			if let Some(dir) = settings.workspace() {
+				ui.label(RichText::new(dir.display().to_string()).monospace().size(11.5).color(p.text2));
+				if ui.small_button("Change…").clicked() {
+					if let Some(d) = rfd::FileDialog::new().set_directory(&dir).pick_folder() {
+						settings.ai_workspace = d.display().to_string();
+						settings.save();
+					}
+				}
+				if ui.small_button("Open").clicked() {
+					let _ = std::fs::create_dir_all(&dir);
+					let _ = open::that(&dir);
+				}
+				if !settings.ai_workspace.is_empty() && ui.small_button("Default").on_hover_text(crate::settings::default_workspace().display().to_string()).clicked() {
+					settings.ai_workspace.clear();
+					settings.save();
+				}
+			}
+		});
 	}
 
 	fn verdict_chip(ui: &mut egui::Ui, p: &Palette, fit: &FitReport) {
@@ -1498,10 +1547,15 @@ fn tool_title(name: &str) -> String {
 	s
 }
 
-fn chip(ui: &mut egui::Ui, p: &Palette, text: &str) {
-	egui::Frame::new().fill(p.hover).corner_radius(10).inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
-		ui.add(egui::Label::new(RichText::new(text).size(11.5).color(p.text2)).truncate());
-	});
+fn chip(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
+	egui::Frame::new()
+		.fill(p.hover)
+		.corner_radius(10)
+		.inner_margin(egui::Margin::symmetric(8, 2))
+		.show(ui, |ui| {
+			ui.add(egui::Label::new(RichText::new(text).size(11.5).color(p.text2)).truncate());
+		})
+		.response
 }
 
 fn user_bubble(ui: &mut egui::Ui, p: &Palette, text: &str) {
