@@ -51,6 +51,7 @@ fn live_turn(ch: &Channel) -> ChannelTurn {
 fn marks_squares_through_the_cli() {
 	let ch = match std::env::var("TAKEOFF_LIVE_CHANNEL").as_deref() {
 		Ok("codex") => Channel::Codex,
+		Ok("opencode") => Channel::OpenCode,
 		_ => Channel::ClaudeCode,
 	};
 	let exe = channel::find_exe(ch).expect("CLI installed");
@@ -115,6 +116,7 @@ fn marks_squares_through_the_cli() {
 fn shell_and_overlay_through_the_cli() {
 	let ch = match std::env::var("TAKEOFF_LIVE_CHANNEL").as_deref() {
 		Ok("codex") => Channel::Codex,
+		Ok("opencode") => Channel::OpenCode,
 		_ => Channel::ClaudeCode,
 	};
 	assert!(std::env::var_os("TAKEOFF_BRIDGE_EXE").is_some(), "set TAKEOFF_BRIDGE_EXE to a built takeoff-desk");

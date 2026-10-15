@@ -152,7 +152,7 @@ These are measurements from Qwen3.8 27B (Q4_K_M) on an M3 Max with 36 GB.
 - **Not yet verified with a live local model:** full symbol sweeps (`detect`), `trace` and
   `follow_line`. They are covered by tests with a scripted model.
 
-## Your own Claude Code or Codex
+## Your own Claude Code or Codex, or OpenCode's free models
 
 If you already pay for Claude or ChatGPT, *Models → Subscriptions* runs the agent on the Claude
 Code or Codex CLI installed on your computer, under the sign-in you already have. Takeoff Desk
@@ -168,7 +168,13 @@ never sees or stores your credentials.
   opens a Terminal window that runs the installer or the sign-in, which continues in your browser.
   The card updates by itself when it's done. Codex installs with npm, so it needs
   [Node.js](https://nodejs.org) first; the card says so and links to it.
-- Needs **Claude Code 2.1.40** or newer, or **Codex 0.140.0** or newer. With an older one,
+- **OpenCode** is the free option. Its free models include **DeepSeek V4.1 Flash**, which can read
+  drawings, and no account is needed. Models you've added to OpenCode with your own provider keys
+  show up too. Only models that can see images and call tools are listed. Two catches: OpenCode's
+  free tier only runs with OpenCode's own setup, including its shell, so it **needs the AI
+  workspace turned on** and works inside that folder. And the free list changes as OpenCode
+  rotates models.
+- Needs **Claude Code 2.1.40** or newer, **Codex 0.140.0** or newer, or **OpenCode 1.18.33** or newer. With an older one,
   *Subscriptions* says so and offers **Update** (`claude update`, or npm for Codex). Turns don't
   start until it's updated.
 - Codex is found even when it only ships inside the ChatGPT desktop app. Sign in once with

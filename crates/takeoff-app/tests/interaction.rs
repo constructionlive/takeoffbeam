@@ -402,3 +402,36 @@ fn markups_list_multi_select() {
 	assert_eq!(app(&mut h).debug_doc().unwrap().doc.lock().data.marks.len(), 0, "deleted all four");
 	assert_eq!(sel(&mut h), 0);
 }
+
+/// The AI prompt grows as you type and stays on screen.
+#[test]
+fn ai_prompt_grows_with_its_text() {
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		eprintln!("sample drawing missing; skipping");
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-prompt-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let copy = dir.join("plan.pdf");
+	std::fs::copy(&pdf, &copy).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let ctx = h.ctx.clone();
+	app(&mut h).open(copy, &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	app(&mut h).debug_right_tab(2);
+	pump(&mut h, 5);
+	let input = |h: &mut H| h.get_by_role(egui::accesskit::Role::MultilineTextInput).rect();
+	let before = input(&mut h);
+	click(&mut h, before.center());
+	h.event(Event::Text("Count every shoring tower on this sheet, then the post shores under the slab edge, and tell me which bays have no shoring at all so I can check them against the formwork plan before we price it. ".repeat(3)));
+	pump(&mut h, 6);
+	let after = input(&mut h);
+	assert!(after.height() > before.height() * 2.0, "grew: {before:?} → {after:?}");
+	assert!(after.bottom() < 900.0 - 30.0, "still above the status bar: {after:?}");
+}

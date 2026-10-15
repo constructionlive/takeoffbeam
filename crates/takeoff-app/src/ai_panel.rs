@@ -92,6 +92,8 @@ pub struct AiPanel {
 	pub follow_request: Option<(PathBuf, u32, (f64, f64, f64, f64))>,
 	/// Last automatic subscription re-check (while waiting on Install / Sign in).
 	last_channel_poll: Option<Instant>,
+	/// The composer's height last frame (it grows as you type); the chat gets the rest.
+	composer_h: f32,
 	sessions: HashMap<PathBuf, Arc<Mutex<ChatSession>>>,
 	turn: Option<TurnHandle>,
 	turn_doc: Option<PathBuf>,
@@ -128,6 +130,7 @@ impl AiPanel {
 			attached: Vec::new(),
 			follow_request: None,
 			last_channel_poll: None,
+			composer_h: 118.0,
 			sessions: HashMap::new(),
 			turn: None,
 			turn_doc: None,
@@ -270,12 +273,16 @@ impl AiPanel {
 			let ok = self.cloud.is_some();
 			(label, if ok { Color32::from_rgb(0x4C, 0xC2, 0xFF) } else { Color32::from_gray(140) }, if ok { "cloud" } else { "signed out" })
 		} else if let Some((ch, model)) = channel_model(m) {
-			let label = format!("{} · {}", ch.name(), if model.is_empty() { "default" } else { model });
+			// "opencode/deepseek-v4.1-flash-free" reads as "deepseek-v4.1-flash-free".
+			let shown = model.strip_prefix("opencode/").unwrap_or(model);
+			let label = format!("{} · {}", ch.name(), if shown.is_empty() { "default" } else { shown });
 			let color = match ch {
 				Channel::ClaudeCode => Color32::from_rgb(0xD9, 0x77, 0x57),
 				Channel::Codex => Color32::from_rgb(0x22, 0xD3, 0xEE),
+				Channel::OpenCode => Color32::from_rgb(0xFB, 0xBF, 0x24),
 			};
-			(label, color, "subscription")
+			let state = if ch == Channel::OpenCode { if model.ends_with("-free") { "free" } else { "your key" } } else { "subscription" };
+			(label, color, state)
 		} else if m == "custom" {
 			(settings.custom_model.clone(), Color32::from_rgb(0xA7, 0x8B, 0xFA), "custom")
 		} else {
@@ -641,11 +648,10 @@ impl AiPanel {
 		let session = self.session(&doc.path);
 		let transcript = session.lock().transcript();
 		let avail = ui.available_height();
-		let composer_h = if self.attached.is_empty() { 118.0 } else { 146.0 };
+		let composer_h = self.composer_h;
 		let mut jump: Option<ViewAttachment> = None;
-		// Both directions: text still wraps to the panel width, but anything that
-		// can't (a wide table line, an image) scrolls instead of being cut off.
-		ScrollArea::both().stick_to_bottom(true).auto_shrink(false).max_height((avail - composer_h).max(80.0)).show(ui, |ui| {
+		// Vertical only: text wraps to the panel; code and tables scroll sideways on their own.
+		ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).max_height((avail - composer_h).max(80.0)).show(ui, |ui| {
 			if transcript.is_empty() && self.turn.is_none() && self.live.text.is_empty() {
 				self.welcome(ui, doc, settings, p);
 			}
@@ -762,6 +768,7 @@ impl AiPanel {
 		});
 
 		// Composer.
+		let composer_top = ui.cursor().top();
 		ui.add_space(4.0);
 		let sel = doc.selection.len();
 		// Wrapped, so a long sheet name can't push the panel wider than it is.
@@ -813,7 +820,8 @@ impl AiPanel {
 				.desired_width(f32::INFINITY)
 				.frame(egui::Frame::NONE)
 				.id(egui::Id::new("ai-input"));
-			let r = ui.add(te);
+			// Grows with what you type, up to ~40% of the panel, then scrolls.
+			let r = ScrollArea::vertical().id_salt("ai-input-scroll").max_height((avail * 0.4).max(80.0)).stick_to_bottom(true).show(ui, |ui| ui.add(te)).inner;
 			let enter = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
 			ui.horizontal(|ui| {
 				if self.usage.0 > 0 {
@@ -845,6 +853,12 @@ impl AiPanel {
 				self.input = self.input.trim_end_matches('\n').to_string();
 			}
 		});
+		let h = ui.min_rect().bottom() - composer_top + 6.0;
+		if (h - self.composer_h).abs() > 0.5 {
+			// Lay the chat out again with the composer's new height.
+			self.composer_h = h;
+			ui.ctx().request_repaint();
+		}
 		let _ = canvas;
 	}
 
@@ -901,6 +915,7 @@ impl AiPanel {
 			let (color, glyph, plan) = match ch {
 				Channel::ClaudeCode => (Color32::from_rgb(0xD9, 0x77, 0x57), i::SPARKLES, "your Claude plan"),
 				Channel::Codex => (Color32::from_rgb(0x10, 0xA3, 0x7F), i::BOT, "your ChatGPT plan"),
+				Channel::OpenCode => (Color32::from_rgb(0xD9, 0x9A, 0x06), i::KEYBOARD, "free models"),
 			};
 			group_header(ui, p, i::KEY_ROUND, ch.name(), plan);
 			let info = self.channels[&ch].clone();
@@ -1741,7 +1756,7 @@ fn user_bubble(ui: &mut egui::Ui, p: &Palette, text: &str) {
 			// Explicit wrap: labels in a right-to-left (horizontal) layout extend by
 			// default, which overflows the panel's left edge and drags the rest of the
 			// transcript with it.
-			ui.add(egui::Label::new(RichText::new(text).size(13.0).color(p.text)).wrap());
+			ui.add(egui::Label::new(RichText::new(text).size(13.0).color(p.text)).wrap().halign(egui::Align::LEFT));
 		});
 	});
 	ui.add_space(4.0);
@@ -1749,19 +1764,36 @@ fn user_bubble(ui: &mut egui::Ui, p: &Palette, text: &str) {
 
 /// Light markdown: headings, bullets, numbered lists, **bold**, `code`, tables as monospace.
 pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
-	let mut in_code = false;
+	let mut code: Vec<&str> = Vec::new();
+	let mut in_fence = false;
 	let mut blank = false;
+	let mut block_no = 0;
+	let flush = |ui: &mut egui::Ui, code: &mut Vec<&str>, block_no: &mut usize| {
+		if code.is_empty() {
+			return;
+		}
+		// Code and tables keep their columns: unwrapped, scrolling sideways on their own.
+		*block_no += 1;
+		ScrollArea::horizontal().id_salt(("md-block", *block_no)).auto_shrink([false, true]).show(ui, |ui| {
+			for l in code.drain(..) {
+				ui.add(egui::Label::new(RichText::new(l).monospace().size(11.5).color(p.text)).extend());
+			}
+		});
+	};
 	for line in text.lines() {
 		let t = line.trim_end();
 		if t.trim_start().starts_with("```") {
-			in_code = !in_code;
+			in_fence = !in_fence;
+			if !in_fence {
+				flush(ui, &mut code, &mut block_no);
+			}
 			continue;
 		}
-		if in_code || t.trim_start().starts_with('|') {
-			// Unwrapped so table columns stay aligned; the transcript scrolls sideways.
-			ui.add(egui::Label::new(RichText::new(t).monospace().size(11.5).color(p.text)).extend());
+		if in_fence || t.trim_start().starts_with('|') {
+			code.push(t);
 			continue;
 		}
+		flush(ui, &mut code, &mut block_no);
 		if t.trim().is_empty() {
 			// Runs of blank lines take the space of one.
 			if !blank {
@@ -1771,59 +1803,63 @@ pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
 			continue;
 		}
 		blank = false;
-		let (indent, body) = {
-			let trimmed = t.trim_start();
-			((t.len() - trimmed.len()) as f32 * 4.0, trimmed)
+		let trimmed = t.trim_start();
+		let indent = (t.len() - trimmed.len()) as f32 * 4.0;
+		let (prefix, rest, size, strong) = if let Some(r) = trimmed.strip_prefix("### ") {
+			("", r, 13.5, true)
+		} else if let Some(r) = trimmed.strip_prefix("## ") {
+			("", r, 14.5, true)
+		} else if let Some(r) = trimmed.strip_prefix("# ") {
+			("", r, 15.5, true)
+		} else if let Some(r) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+			("•  ", r, 13.0, false)
+		} else {
+			("", trimmed, 13.0, false)
 		};
-		ui.horizontal_wrapped(|ui| {
-			ui.add_space(indent);
-			ui.spacing_mut().item_spacing.x = 0.0;
-			let (prefix, rest, size, strong) = if let Some(r) = body.strip_prefix("### ") {
-				("", r, 13.5, true)
-			} else if let Some(r) = body.strip_prefix("## ") {
-				("", r, 14.5, true)
-			} else if let Some(r) = body.strip_prefix("# ") {
-				("", r, 15.5, true)
-			} else if let Some(r) = body.strip_prefix("- ").or_else(|| body.strip_prefix("* ")) {
-				("•  ", r, 13.0, false)
-			} else {
-				("", body, 13.0, false)
-			};
-			if !prefix.is_empty() {
-				ui.label(RichText::new(prefix).size(size).color(p.accent));
+		// One wrapped text block per line, so every wrapped row is spaced the same.
+		let mut job = egui::text::LayoutJob::default();
+		let style = ui.style().clone();
+		let mut add = |rt: RichText| rt.append_to(&mut job, &style, egui::FontSelection::Default, egui::Align::Center);
+		if !prefix.is_empty() {
+			add(RichText::new(prefix).size(size).color(p.accent));
+		}
+		// **bold**, `code` and *italic* spans.
+		let mut bold = strong;
+		for (k, part) in rest.split("**").enumerate() {
+			if k > 0 {
+				bold = !bold;
 			}
-			// **bold** and `code` spans.
-			let mut bold = strong;
-			for (k, part) in rest.split("**").enumerate() {
-				if k > 0 {
-					bold = !bold;
+			for (j, seg) in part.split('`').enumerate() {
+				if seg.is_empty() {
+					continue;
 				}
-				for (j, seg) in part.split('`').enumerate() {
-					if seg.is_empty() {
+				if j % 2 == 1 {
+					add(RichText::new(seg).monospace().size(12.0).color(p.accent));
+					continue;
+				}
+				for (m, it) in seg.split('*').enumerate() {
+					if it.is_empty() {
 						continue;
 					}
-					if j % 2 == 1 {
-						ui.label(RichText::new(seg).monospace().size(12.0).color(p.accent));
-						continue;
+					let mut rt = RichText::new(it).size(size).color(p.text);
+					if bold {
+						rt = rt.font(theme::semibold(size));
 					}
-					// *italic* spans (single asterisks; ** is handled above).
-					for (m, it) in seg.split('*').enumerate() {
-						if it.is_empty() {
-							continue;
-						}
-						let mut rt = RichText::new(it).size(size).color(p.text);
-						if bold {
-							rt = rt.font(theme::semibold(size));
-						}
-						if m % 2 == 1 {
-							rt = rt.italics();
-						}
-						ui.label(rt);
+					if m % 2 == 1 {
+						rt = rt.italics();
 					}
+					add(rt);
 				}
 			}
-		});
+		}
+		let label = egui::Label::new(job).wrap();
+		if indent > 0.0 {
+			egui::Frame::new().inner_margin(egui::Margin { left: indent.min(120.0) as i8, ..Default::default() }).show(ui, |ui| ui.add(label));
+		} else {
+			ui.add(label);
+		}
 	}
+	flush(ui, &mut code, &mut block_no);
 }
 
 /// The provider's badge for the current model id.
@@ -1836,6 +1872,8 @@ fn provider_badge(model: &str) -> (Color32, &'static str) {
 		(Color32::from_rgb(0xD9, 0x77, 0x57), i::SPARKLES)
 	} else if model.starts_with("codex:") {
 		(Color32::from_rgb(0x10, 0xA3, 0x7F), i::BOT)
+	} else if model.starts_with("opencode:") {
+		(Color32::from_rgb(0xD9, 0x9A, 0x06), i::KEYBOARD)
 	} else if model == "custom" {
 		(Color32::from_rgb(0xA7, 0x8B, 0xFA), i::SERVER)
 	} else {
@@ -1933,6 +1971,48 @@ mod tests {
 		let prose = "1. Mainline Proposed Tracks 1, 2, 3 on RP-03 to RP-23 (pages 44–64)\n- **Track 1** runs the full sheet (144+00→159+00); Proposed Tracks 2 and 3 begin at STA 156+11. Measuring those and loading page 46 at the same time.\n### Scope 3 it is — all proposed tracks, in feet";
 		let r = markdown_size(prose, 300.0);
 		assert!(r.width() <= 300.5, "prose wraps inside the column (no sideways scroll): {}", r.width());
+	}
+
+	#[test]
+	fn wrapped_lines_are_evenly_spaced_and_code_scrolls_in_its_own_block() {
+		let para = "I haven't marked or measured anything yet. If you want a takeoff, tell me what to count or measure (for example shoring towers, post shores, or beam lengths) and I'll set the scale first.";
+		// The same text as one plain wrapped label: no extra gap after the first row.
+		let ctx = egui::Context::default();
+		theme::install_fonts(&ctx);
+		let mut plain = 0.0;
+		let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0))), ..Default::default() }, |ui| {
+			let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 4000.0))));
+			plain = ui.add(egui::Label::new(RichText::new(para).size(13.0)).wrap()).rect.height();
+		});
+		let md = markdown_size(para, 300.0).height();
+		assert!(plain > 40.0, "it wraps onto several lines: {plain}");
+		assert!((md - plain).abs() < 1.0, "markdown {md} vs plain label {plain}");
+		let code = format!("Here:\n```\n{}\n```\nDone.", "x".repeat(400));
+		assert!(markdown_size(&code, 300.0).width() <= 300.5, "a long code line scrolls inside its block");
+	}
+
+	/// Visual check: `PREVIEW_PNG=/path.png cargo test -p takeoff-app --lib chat_preview -- --ignored`
+	#[test]
+	#[ignore]
+	fn chat_preview() {
+		let mut fonts = false;
+		let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(380.0, 420.0)).build_ui(move |ui| {
+			// Fonts apply from the next frame.
+			if !fonts {
+				theme::install_fonts(ui.ctx());
+				fonts = true;
+				return;
+			}
+			let p = theme::palette(ui.ctx());
+			egui::Frame::new().fill(p.panel).inner_margin(12).show(ui, |ui| {
+				markdown(ui, &p, "I haven't marked or measured anything yet. If you want a takeoff, tell me what to count or measure (for example shoring towers, post shores, or beam lengths) and I'll set the scale first.");
+				user_bubble(ui, &p, "can you draw 3d html\n, so i can understand what what is suspended slab and how shoring works");
+				markdown(ui, &p, "### Shoring\n- **Post shores** under the slab edge, spaced at `1.5x2.4`\n- Towers at the cores\n\n| Item | Qty |\n|---|---|\n| 1.5x2.4 Tower with a very long description that does not fit | 12 |");
+			});
+		});
+		h.run();
+		let img = h.render().expect("render");
+		img.save(std::env::var("PREVIEW_PNG").unwrap_or_else(|_| "/tmp/chat_preview.png".into())).unwrap();
 	}
 
 	#[test]

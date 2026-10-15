@@ -47,16 +47,19 @@ const TOOL_TIMEOUT_SECS: u64 = 900;
 pub enum Channel {
 	ClaudeCode,
 	Codex,
+	/// OpenCode: free models (DeepSeek and others) or the person's own provider keys.
+	OpenCode,
 }
 
 impl Channel {
-	pub const ALL: [Channel; 2] = [Channel::ClaudeCode, Channel::Codex];
+	pub const ALL: [Channel; 3] = [Channel::ClaudeCode, Channel::Codex, Channel::OpenCode];
 
 	/// Stored in settings (`claude:<model>`) and in [`ExternalThread::channel`].
 	pub fn key(self) -> &'static str {
 		match self {
 			Channel::ClaudeCode => "claude",
 			Channel::Codex => "codex",
+			Channel::OpenCode => "opencode",
 		}
 	}
 
@@ -68,6 +71,7 @@ impl Channel {
 		match self {
 			Channel::ClaudeCode => "Claude Code",
 			Channel::Codex => "Codex",
+			Channel::OpenCode => "OpenCode",
 		}
 	}
 
@@ -75,6 +79,7 @@ impl Channel {
 		match self {
 			Channel::ClaudeCode => "Claude Pro, Max, Team or Enterprise",
 			Channel::Codex => "ChatGPT Plus, Pro, Business or Enterprise",
+			Channel::OpenCode => "Free models, or your own provider keys",
 		}
 	}
 
@@ -83,12 +88,14 @@ impl Channel {
 			Channel::ClaudeCode if cfg!(windows) => "irm https://claude.ai/install.ps1 | iex",
 			Channel::ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
 			Channel::Codex => "npm install -g @openai/codex",
+			Channel::OpenCode if cfg!(windows) => "npm install -g opencode-ai",
+			Channel::OpenCode => "curl -fsSL https://opencode.ai/install | bash",
 		}
 	}
 
 	/// Installing it needs Node.js (npm) first.
 	pub fn needs_node(self) -> bool {
-		self == Channel::Codex
+		self == Channel::Codex || (self == Channel::OpenCode && cfg!(windows))
 	}
 
 	/// Oldest release with everything Takeoff Desk uses (`--tools`, `--mcp-config`,
@@ -97,6 +104,7 @@ impl Channel {
 		match self {
 			Channel::ClaudeCode => "2.1.40",
 			Channel::Codex => "0.140.0",
+			Channel::OpenCode => "1.18.33",
 		}
 	}
 
@@ -104,6 +112,7 @@ impl Channel {
 		match self {
 			Channel::ClaudeCode => "claude update",
 			Channel::Codex => "npm install -g @openai/codex@latest",
+			Channel::OpenCode => "opencode upgrade",
 		}
 	}
 
@@ -111,6 +120,7 @@ impl Channel {
 		match self {
 			Channel::ClaudeCode => "claude auth login",
 			Channel::Codex => "codex login",
+			Channel::OpenCode => "opencode auth login",
 		}
 	}
 
@@ -126,7 +136,7 @@ impl Channel {
 pub(crate) fn search_dirs() -> Vec<PathBuf> {
 	let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
 	if let Some(home) = dirs::home_dir() {
-		for d in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin", "bin"] {
+		for d in [".local/bin", ".opencode/bin", ".claude/local", ".npm-global/bin", ".bun/bin", ".volta/bin", ".cargo/bin", "bin"] {
 			dirs.push(home.join(d));
 		}
 		if let Ok(rd) = std::fs::read_dir(home.join(".nvm/versions/node")) {
@@ -177,6 +187,7 @@ fn bundled(channel: Channel) -> Vec<PathBuf> {
 		let apps: &[&str] = match channel {
 			Channel::Codex => &["ChatGPT.app/Contents/Resources/codex", "Codex.app/Contents/Resources/codex"],
 			Channel::ClaudeCode => &["Claude.app/Contents/Resources/claude"],
+			Channel::OpenCode => &[],
 		};
 		for root in [PathBuf::from("/Applications"), dirs::home_dir().unwrap_or_default().join("Applications")] {
 			out.extend(apps.iter().map(|a| root.join(a)));
@@ -355,6 +366,7 @@ pub fn login_command_for(channel: Channel, exe: &Path) -> String {
 	match channel {
 		Channel::ClaudeCode => format!("{quoted} auth login"),
 		Channel::Codex => format!("{quoted} login"),
+		Channel::OpenCode => format!("{quoted} auth login"),
 	}
 }
 
@@ -364,6 +376,11 @@ pub fn update(channel: Channel, exe: &Path) -> Result<String, String> {
 		Channel::ClaudeCode => {
 			let mut c = command(exe);
 			c.arg("update");
+			c
+		}
+		Channel::OpenCode => {
+			let mut c = command(exe);
+			c.arg("upgrade");
 			c
 		}
 		Channel::Codex => {
@@ -414,6 +431,12 @@ pub fn status(channel: Channel) -> ChannelStatus {
 				}
 			}
 		}
+		Channel::OpenCode => {
+			// Its free models need no account; providers people add are optional.
+			let _ = a;
+			st.signed_in = Some(true);
+			st.account = Some("free models".into());
+		}
 		Channel::Codex => {
 			a.args(["login", "status"]);
 			if let Ok(r) = run(a, "", Duration::from_secs(20)) {
@@ -448,6 +471,15 @@ pub fn models(channel: Channel, exe: &Path) -> Result<Vec<ChannelModel>, String>
 			m("sonnet", "Sonnet", "Fast and capable"),
 			m("haiku", "Haiku", "Fastest, lightest"),
 		]),
+		Channel::OpenCode => {
+			let mut c = command(exe);
+			c.args(["models", "--verbose"]);
+			let r = run(c, "", Duration::from_secs(60))?;
+			if !r.ok {
+				return Err(tail(&r.stderr, 3));
+			}
+			Ok(parse_opencode_models(&r.stdout))
+		}
 		Channel::Codex => {
 			let mut c = command(exe);
 			c.args(["debug", "models"]);
@@ -459,6 +491,47 @@ pub fn models(channel: Channel, exe: &Path) -> Result<Vec<ChannelModel>, String>
 			Ok(parse_codex_models(&v))
 		}
 	}
+}
+
+/// `opencode models --verbose`: "provider/id" then that model's JSON, for each.
+/// Keeps the ones that can see images and call tools (the drawing tools need
+/// both); free ones first.
+fn parse_opencode_models(text: &str) -> Vec<ChannelModel> {
+	let lines: Vec<&str> = text.lines().collect();
+	let mut out: Vec<(bool, ChannelModel)> = Vec::new();
+	let mut i = 0;
+	while i < lines.len() {
+		let id = lines[i].trim();
+		if id.contains('/') && !id.contains(' ') && lines.get(i + 1).is_some_and(|l| l.trim() == "{") {
+			// Collect the JSON object that follows (until its closing brace at column 0).
+			let mut j = i + 1;
+			let mut body = String::new();
+			while j < lines.len() {
+				body.push_str(lines[j]);
+				body.push('\n');
+				if lines[j] == "}" {
+					break;
+				}
+				j += 1;
+			}
+			if let Ok(v) = serde_json::from_str::<Value>(&body) {
+				let image = v.pointer("/capabilities/input/image").and_then(Value::as_bool).unwrap_or(false);
+				let tools = v.pointer("/capabilities/toolcall").and_then(Value::as_bool).unwrap_or(false);
+				let free = v.pointer("/cost/input").and_then(Value::as_f64) == Some(0.0) && v.pointer("/cost/output").and_then(Value::as_f64) == Some(0.0);
+				if image && tools {
+					let name = s(&v, "/name");
+					let provider = id.split('/').next().unwrap_or("");
+					let note = if free { "Free".to_string() } else { format!("via {provider}") };
+					out.push((free, ChannelModel { id: id.to_string(), label: if name.is_empty() { id.to_string() } else { name.to_string() }, note }));
+				}
+			}
+			i = j + 1;
+			continue;
+		}
+		i += 1;
+	}
+	out.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.label.cmp(&b.1.label)));
+	out.into_iter().map(|(_, m)| m).collect()
 }
 
 fn parse_codex_models(v: &Value) -> Vec<ChannelModel> {
@@ -503,6 +576,30 @@ pub fn test_model(channel: Channel, exe: &Path, model: &str, workdir: &Path) -> 
 			}
 			let used: Vec<String> = v.get("modelUsage").and_then(Value::as_object).map(|o| o.keys().cloned().collect()).unwrap_or_default();
 			Ok(if used.is_empty() { "Works".into() } else { format!("Works · {}", used.join(", ")) })
+		}
+		Channel::OpenCode => {
+			c.args(["run", "--format", "json"]);
+			if !model.is_empty() {
+				c.args(["-m", model]);
+			}
+			let r = run(c, prompt, Duration::from_secs(180))?;
+			let mut p = OpenCodeParser::default();
+			let mut err = None;
+			let mut text = false;
+			for line in r.stdout.lines() {
+				for ev in p.line(line) {
+					match ev {
+						Ev::Error(e) => err = Some(e),
+						Ev::Text(_) => text = true,
+						_ => {}
+					}
+				}
+			}
+			match (text, err) {
+				(_, Some(e)) => Err(e),
+				(true, None) => Ok("Works".into()),
+				(false, None) => Err(tail(&format!("{}\n{}", r.stdout, r.stderr), 3)),
+			}
 		}
 		Channel::Codex => {
 			c.args(["exec", "--json", "--skip-git-repo-check", "--ephemeral", "-s", "read-only"]);
@@ -802,9 +899,10 @@ fn channel_note(channel: Channel, sweeps: bool, workspace: bool) -> String {
 	let names = match channel {
 		Channel::ClaudeCode => " (here they are named mcp__takeoff__view, mcp__takeoff__add_marks and so on)",
 		Channel::Codex => "",
+		Channel::OpenCode => " (here they are named takeoff_view, takeoff_add_marks and so on)",
 	};
 	let mut s = format!(
-		"\n\n# This session\n\nYou are running in {} on the estimator's own subscription. Your drawing tools come from the MCP server \"{SERVER}\"{names}. {reach} Each message starts with a [Viewer: …] line saying what the estimator is looking at.",
+		"\n\n# This session\n\nYou are running in {} on the estimator's own account. Your drawing tools come from the MCP server \"{SERVER}\"{names}. {reach} Each message starts with a [Viewer: …] line saying what the estimator is looking at.",
 		channel.name(),
 		reach = if workspace {
 			"Your own shell and file tools run in the workspace folder (your working directory); use them there, and use the drawing tools for everything on the drawing."
@@ -849,6 +947,12 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 		let _ = tx.send(AgentEvent::Error(outdated_message(turn.channel, &v)));
 		return 0;
 	}
+	if turn.channel == Channel::OpenCode && turn.workspace.is_none() {
+		let _ = tx.send(AgentEvent::Error(
+			"OpenCode needs the AI workspace turned on: its free models only run with OpenCode's own tools, including its shell, so it works inside the workspace folder. Turn it on under Models (Let the AI run commands in a workspace folder).".into(),
+		));
+		return 0;
+	}
 	let drawing = match takeoff_pdf::Drawing::open(&shared.pdf) {
 		Ok(d) => d,
 		Err(e) => {
@@ -876,6 +980,7 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 	let dialect_model = match (turn.model.as_str(), turn.channel) {
 		("", Channel::ClaudeCode) => "claude".to_string(),
 		("", Channel::Codex) => "gpt".to_string(),
+		("", Channel::OpenCode) => "opencode".to_string(),
 		(m, _) => m.to_string(),
 	};
 	shared.begin(Link { tx: tx.clone(), session: session.clone(), cancel: cancel.clone(), current_page: turn.current_page, model: dialect_model, sweeps: turn.sweeps.clone(), pending: pending.clone(), workspace: turn.workspace.clone(), others: turn.others.clone() });
@@ -885,7 +990,7 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 	for attempt in 0..2 {
 		let preamble = if resume.is_none() { history_preamble(&session.lock()) } else { String::new() };
 		let prompt = match (turn.channel, resume.is_some()) {
-			(Channel::Codex, false) => format!("<takeoff_desk_instructions>\n{system}\n</takeoff_desk_instructions>\n\n{preamble}{ctx_line}\n\n{user_text}"),
+			(Channel::Codex | Channel::OpenCode, false) => format!("<takeoff_desk_instructions>\n{system}\n</takeoff_desk_instructions>\n\n{preamble}{ctx_line}\n\n{user_text}"),
 			_ => format!("{preamble}{ctx_line}\n\n{user_text}"),
 		};
 		let out = run_cli(&turn, &bridge, &system, resume.as_deref(), &prompt, session, &pending, tx, cancel);
@@ -924,6 +1029,27 @@ fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option
 	let mut c = command(&turn.exe);
 	c.current_dir(turn.cwd());
 	match turn.channel {
+		Channel::OpenCode => {
+			// OpenCode as it ships (its free tier refuses changed agents or tool
+			// sets), plus our drawing tools as an MCP server, in the workspace.
+			let cfg = json!({ "mcp": { SERVER: {
+				"type": "local",
+				"command": [bridge.exe, BRIDGE_ARG, bridge.addr],
+				"environment": { TOKEN_ENV: bridge.token },
+				"enabled": true,
+				"timeout": 30000,
+			}}});
+			c.env("OPENCODE_CONFIG_CONTENT", cfg.to_string());
+			c.args(["run", "--format", "json", "--auto"]);
+			c.arg("--dir").arg(turn.cwd());
+			if !turn.model.is_empty() {
+				c.args(["-m", &turn.model]);
+			}
+			if let Some(id) = resume {
+				c.args(["-s", id]);
+			}
+			let _ = system; // sent in the first message (see run_turn)
+		}
 		Channel::ClaudeCode => {
 			let mcp = json!({ "mcpServers": { SERVER: {
 				"type": "stdio",
@@ -1044,6 +1170,7 @@ fn run_cli(
 	let mut parser: Box<dyn Parser> = match turn.channel {
 		Channel::ClaudeCode => Box::new(ClaudeParser::default()),
 		Channel::Codex => Box::new(CodexParser::default()),
+		Channel::OpenCode => Box::new(OpenCodeParser::default()),
 	};
 	let mut done = false;
 	let mut foreign = Vec::new();
@@ -1323,6 +1450,73 @@ impl Parser for CodexParser {
 	}
 }
 
+/// `opencode run --format json`: one JSON event per line (step_start, text,
+/// reasoning, tool_use, step_finish, error), each with the session id.
+#[derive(Default)]
+struct OpenCodeParser {
+	session: Option<String>,
+	text_seen: bool,
+}
+
+impl Parser for OpenCodeParser {
+	fn line(&mut self, line: &str) -> Vec<Ev> {
+		let mut out = Vec::new();
+		let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return out };
+		let sid = s(&v, "/sessionID");
+		if !sid.is_empty() && self.session.as_deref() != Some(sid) {
+			self.session = Some(sid.to_string());
+			out.push(Ev::Thread(sid.to_string()));
+		}
+		match s(&v, "/type") {
+			"text" => {
+				let t = s(&v, "/part/text");
+				if !t.trim().is_empty() {
+					if self.text_seen {
+						out.push(Ev::Text("\n\n".into()));
+					}
+					self.text_seen = true;
+					out.push(Ev::Text(t.to_string()));
+				}
+			}
+			"reasoning" => {
+				let t = s(&v, "/part/text");
+				if !t.is_empty() {
+					out.push(Ev::Reasoning(t.to_string()));
+				}
+			}
+			"tool_use" => {
+				let name = s(&v, "/part/tool");
+				if name.starts_with(&format!("{SERVER}_")) {
+					out.push(Ev::OwnToolUse);
+				} else {
+					// Reported once it has finished: start and finish together.
+					let id = Some(s(&v, "/part/callID")).filter(|x| !x.is_empty()).unwrap_or(s(&v, "/part/id")).to_string();
+					let ok = s(&v, "/part/state/status") != "error";
+					let detail = if ok { s(&v, "/part/state/output") } else { s(&v, "/part/state/error") };
+					let summary = detail.lines().find(|l| !l.trim().is_empty()).unwrap_or(if ok { "done" } else { "failed" }).chars().take(300).collect();
+					out.push(Ev::ToolStarted { id: id.clone(), name: name.to_string(), args: v.pointer("/part/state/input").cloned().unwrap_or(Value::Null) });
+					out.push(Ev::ToolFinished { id, ok, summary });
+				}
+			}
+			"step_finish" => {
+				let prompt = u(&v, "/part/tokens/input") + u(&v, "/part/tokens/cache/read");
+				out.push(Ev::Usage { prompt, completion: u(&v, "/part/tokens/output") });
+				// A step that ends in tool calls is followed by another step.
+				if s(&v, "/part/reason") != "tool-calls" {
+					out.push(Ev::Done);
+				}
+			}
+			"error" => {
+				let msg = Some(s(&v, "/error/data/message")).filter(|m| !m.is_empty()).unwrap_or(s(&v, "/error/name"));
+				out.push(Ev::Error(format!("OpenCode: {msg}")));
+				out.push(Ev::Done);
+			}
+			_ => {}
+		}
+		out
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1440,6 +1634,45 @@ mod tests {
 		assert!(p.contains("Estimator: Count outlets") && p.contains("Bench: Found 4."));
 		assert!(!p.contains("Now switches"));
 		assert_eq!(history_preamble(&ChatSession::new()), "");
+	}
+
+	#[test]
+	fn opencode_stream() {
+		let lines = [
+			r#"{"type":"step_start","sessionID":"ses_a","part":{"type":"step-start"}}"#,
+			r#"{"type":"tool_use","sessionID":"ses_a","part":{"type":"tool","tool":"takeoff_view","callID":"c1","state":{"status":"completed","input":{"page":1},"output":"View v1"}}}"#,
+			r#"{"type":"tool_use","sessionID":"ses_a","part":{"type":"tool","tool":"bash","callID":"c2","state":{"status":"completed","input":{"command":"ls"},"output":"a.txt\nb.txt"}}}"#,
+			r#"{"type":"step_finish","sessionID":"ses_a","part":{"reason":"tool-calls","tokens":{"input":800,"output":40,"cache":{"read":15000}}}}"#,
+			r#"{"type":"text","sessionID":"ses_a","part":{"type":"text","text":"3"}}"#,
+			r#"{"type":"step_finish","sessionID":"ses_a","part":{"reason":"stop","tokens":{"input":600,"output":2,"cache":{"read":16000}}}}"#,
+		];
+		let evs = feed(&mut OpenCodeParser::default(), &lines);
+		assert!(matches!(&evs[0], Ev::Thread(id) if id == "ses_a"));
+		assert!(evs.iter().any(|e| matches!(e, Ev::OwnToolUse)), "our tools are reported by the host");
+		assert!(evs.iter().any(|e| matches!(e, Ev::ToolStarted { name, .. } if name == "bash")));
+		assert!(evs.iter().any(|e| matches!(e, Ev::ToolFinished { ok: true, summary, .. } if summary == "a.txt")));
+		assert!(evs.iter().any(|e| matches!(e, Ev::Usage { prompt: 15800, completion: 40 })));
+		assert!(evs.iter().any(|e| matches!(e, Ev::Text(t) if t == "3")));
+		assert_eq!(evs.iter().filter(|e| matches!(e, Ev::Done)).count(), 1, "done only after the final step");
+		assert!(matches!(evs.last(), Some(Ev::Done)));
+	}
+
+	#[test]
+	fn opencode_errors_are_shown() {
+		let line = r#"{"type":"error","sessionID":"ses_b","error":{"name":"APIError","data":{"message":"OpenCode's free tier can only be used from within OpenCode.","statusCode":403}}}"#;
+		let evs = feed(&mut OpenCodeParser::default(), &[line]);
+		assert!(evs.iter().any(|e| matches!(e, Ev::Error(m) if m.contains("free tier"))));
+		assert!(matches!(evs.last(), Some(Ev::Done)));
+	}
+
+	#[test]
+	fn opencode_models_keep_free_vision_tool_models_first() {
+		let text = "opencode/deepseek-v4.1-flash-free\n{\n  \"name\": \"DeepSeek V4.1 Flash Free\",\n  \"cost\": {\"input\": 0, \"output\": 0},\n  \"capabilities\": {\"toolcall\": true, \"input\": {\"image\": true}}\n}\nopencode/text-only-free\n{\n  \"name\": \"Text Only\",\n  \"cost\": {\"input\": 0, \"output\": 0},\n  \"capabilities\": {\"toolcall\": true, \"input\": {\"image\": false}}\n}\nanthropic/claude-x\n{\n  \"name\": \"Claude X\",\n  \"cost\": {\"input\": 3, \"output\": 15},\n  \"capabilities\": {\"toolcall\": true, \"input\": {\"image\": true}}\n}\n";
+		let m = parse_opencode_models(text);
+		assert_eq!(m.len(), 2, "text-only models are left out: {m:?}");
+		assert_eq!(m[0].id, "opencode/deepseek-v4.1-flash-free");
+		assert_eq!(m[0].note, "Free");
+		assert_eq!(m[1].note, "via anthropic");
 	}
 
 	#[test]
