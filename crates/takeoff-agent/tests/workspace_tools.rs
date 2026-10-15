@@ -98,6 +98,12 @@ fn overlay_from_a_workspace_file_and_bad_input() {
 	assert!(tools::call(&mut ctx, "add_overlay", json!({ "svg": "<not svg" })).is_err(), "invalid SVG is refused");
 	assert!(tools::call(&mut ctx, "add_overlay", json!({ "svg": "<svg/>", "file": "zones.svg" })).is_err(), "two sources are refused");
 	assert_eq!(ctx.doc.lock().data.overlays.len(), 1);
+
+	// A view with no box: the overlay covers what that view shows.
+	let v = tools::call(&mut ctx, "view", json!({ "region": {"x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5} })).unwrap().images[0].view_id.clone();
+	tools::call(&mut ctx, "add_overlay", json!({ "view": v, "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'/>" })).unwrap();
+	let o = ctx.doc.lock().data.overlays[1].clone();
+	assert!(o.x > 0.0 && o.w < 1.0, "placed on the view's region: {o:?}");
 }
 
 #[test]

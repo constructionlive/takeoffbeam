@@ -155,6 +155,9 @@ never sees or stores your credentials.
   come from the app over a private local MCP bridge, so marks appear live and are undoable like any
   other.
 - Usage counts against your plan's limits, not construction.live credits.
+- Needs **Claude Code 2.1.40** or newer, or **Codex 0.140.0** or newer. With an older one,
+  *Subscriptions* says so and offers **Update** (`claude update`, or npm for Codex). Turns don't
+  start until it's updated.
 - Codex is found even when it only ships inside the ChatGPT desktop app. Sign in once with
   `codex login`.
 - Symbol sweeps (`detect`, `calibrate`, `trace`) make their own vision calls. They use your

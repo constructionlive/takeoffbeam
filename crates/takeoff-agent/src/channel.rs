@@ -85,6 +85,22 @@ impl Channel {
 		}
 	}
 
+	/// Oldest release with everything Takeoff Desk uses (`--tools`, `--mcp-config`,
+	/// `dontAsk`, `auth status --json`… / `exec --json`, `workspace-write`, `debug models`).
+	pub fn min_version(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "2.1.40",
+			Channel::Codex => "0.140.0",
+		}
+	}
+
+	pub fn update_command(self) -> &'static str {
+		match self {
+			Channel::ClaudeCode => "claude update",
+			Channel::Codex => "npm install -g @openai/codex@latest",
+		}
+	}
+
 	pub fn login_command(self) -> &'static str {
 		match self {
 			Channel::ClaudeCode => "claude auth login",
@@ -173,6 +189,9 @@ fn command(exe: &Path) -> Command {
 	if let Ok(p) = std::env::join_paths(path) {
 		cmd.env("PATH", p);
 	}
+	// Started from a Claude Code terminal, these make the CLI refuse to run
+	// ("cannot be launched inside another Claude Code session").
+	cmd.env_remove("CLAUDECODE").env_remove("CLAUDE_CODE_ENTRYPOINT");
 	#[cfg(windows)]
 	{
 		use std::os::windows::process::CommandExt;
@@ -236,6 +255,77 @@ pub struct ChannelStatus {
 	/// "Max plan", "ChatGPT", "API key"…
 	pub account: Option<String>,
 	pub error: Option<String>,
+	/// Older than [`Channel::min_version`]: it must be updated before use.
+	pub outdated: bool,
+}
+
+/// The first `x.y.z` in a version line ("2.1.300 (Claude Code)", "codex-cli 0.162.1").
+pub fn parse_version(line: &str) -> Option<(u64, u64, u64)> {
+	line.split(|c: char| !(c.is_ascii_digit() || c == '.')).find_map(|w| {
+		let mut it = w.split('.').map(|n| n.parse::<u64>().ok());
+		match (it.next()??, it.next()??, it.next()??) {
+			(a, b, c) => Some((a, b, c)),
+		}
+	})
+}
+
+/// Whether a `--version` line is older than the channel's minimum.
+pub fn too_old(channel: Channel, version_line: &str) -> bool {
+	match (parse_version(version_line), parse_version(channel.min_version())) {
+		(Some(v), Some(min)) => v < min,
+		_ => false,
+	}
+}
+
+/// "Update Claude Code" message for a CLI that is too old.
+pub fn outdated_message(channel: Channel, version_line: &str) -> String {
+	let v = parse_version(version_line).map(|(a, b, c)| format!("{a}.{b}.{c}")).unwrap_or_else(|| version_line.trim().to_string());
+	format!(
+		"{} {v} is too old for Takeoff Desk (it needs {} or newer). Update it under Models → Subscriptions, or run `{}` in a terminal.",
+		channel.name(),
+		channel.min_version(),
+		channel.update_command()
+	)
+}
+
+/// The installed CLI's version line, cached per executable (path + modified time).
+fn installed_version(exe: &Path) -> Option<String> {
+	use std::collections::HashMap;
+	use std::sync::OnceLock;
+	static CACHE: OnceLock<Mutex<HashMap<(PathBuf, Option<std::time::SystemTime>), String>>> = OnceLock::new();
+	let key = (exe.to_path_buf(), std::fs::metadata(exe).and_then(|m| m.modified()).ok());
+	if let Some(v) = CACHE.get_or_init(Default::default).lock().get(&key) {
+		return Some(v.clone());
+	}
+	let mut c = command(exe);
+	c.arg("--version");
+	let r = run(c, "", Duration::from_secs(20)).ok().filter(|r| r.ok)?;
+	let line = r.stdout.lines().next()?.trim().to_string();
+	CACHE.get_or_init(Default::default).lock().insert(key, line.clone());
+	Some(line)
+}
+
+/// Update the CLI in place (`claude update` / npm). Returns its output.
+pub fn update(channel: Channel, exe: &Path) -> Result<String, String> {
+	let cmd = match channel {
+		Channel::ClaudeCode => {
+			let mut c = command(exe);
+			c.arg("update");
+			c
+		}
+		Channel::Codex => {
+			if exe.components().any(|c| c.as_os_str().to_string_lossy().ends_with(".app")) {
+				return Err("This Codex ships inside the ChatGPT app: update the ChatGPT app, or install the standalone CLI with `npm install -g @openai/codex@latest`.".into());
+			}
+			let npm = search_dirs().into_iter().map(|d| d.join(if cfg!(windows) { "npm.cmd" } else { "npm" })).find(|p| p.is_file()).ok_or("npm not found: install Node.js, or update Codex the way you installed it.")?;
+			let mut c = command(&npm);
+			c.args(["install", "-g", "@openai/codex@latest"]);
+			c
+		}
+	};
+	let r = run(cmd, "", Duration::from_secs(300))?;
+	let out = tail(&format!("{}\n{}", r.stdout, r.stderr), 6);
+	if r.ok { Ok(out) } else { Err(out) }
 }
 
 /// Installed? Which version? Signed in, and with what? Runs the CLI (a few seconds at most).
@@ -248,6 +338,11 @@ pub fn status(channel: Channel) -> ChannelStatus {
 		Ok(r) if r.ok => st.version = r.stdout.lines().next().map(|l| l.trim().to_string()),
 		Ok(r) => st.error = Some(tail(&format!("{}\n{}", r.stdout, r.stderr), 3)),
 		Err(e) => st.error = Some(e),
+	}
+	if st.version.as_deref().is_some_and(|v| too_old(channel, v)) {
+		// Its sign-in check may not even exist yet; updating comes first.
+		st.outdated = true;
+		return st;
 	}
 	let mut a = command(&exe);
 	match channel {
@@ -695,6 +790,10 @@ fn history_preamble(session: &ChatSession) -> String {
 }
 
 fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSession>>, turn: ChannelTurn, user_text: String, tx: &Sender<AgentEvent>, cancel: &Arc<AtomicBool>) -> u32 {
+	if let Some(v) = installed_version(&turn.exe).filter(|v| too_old(turn.channel, v)) {
+		let _ = tx.send(AgentEvent::Error(outdated_message(turn.channel, &v)));
+		return 0;
+	}
 	let drawing = match takeoff_pdf::Drawing::open(&shared.pdf) {
 		Ok(d) => d,
 		Err(e) => {
@@ -1285,6 +1384,22 @@ mod tests {
 		assert!(p.contains("Estimator: Count outlets") && p.contains("Bench: Found 4."));
 		assert!(!p.contains("Now switches"));
 		assert_eq!(history_preamble(&ChatSession::new()), "");
+	}
+
+	#[test]
+	fn versions_compare_against_the_minimum() {
+		assert_eq!(parse_version("2.1.300 (Claude Code)"), Some((2, 1, 300)));
+		assert_eq!(parse_version("codex-cli 0.162.1"), Some((0, 162, 1)));
+		assert_eq!(parse_version("no version here"), None);
+		assert!(too_old(Channel::ClaudeCode, "2.0.77 (Claude Code)"));
+		assert!(too_old(Channel::ClaudeCode, "2.1.39 (Claude Code)"));
+		assert!(!too_old(Channel::ClaudeCode, "2.1.40 (Claude Code)"));
+		assert!(!too_old(Channel::ClaudeCode, "2.1.300 (Claude Code)"));
+		assert!(!too_old(Channel::ClaudeCode, "3.0.0 (Claude Code)"));
+		assert!(too_old(Channel::Codex, "codex-cli 0.139.0"));
+		assert!(!too_old(Channel::Codex, "codex-cli 0.162.1"));
+		assert!(!too_old(Channel::Codex, "something odd"), "unknown format is let through, not blocked");
+		assert!(outdated_message(Channel::ClaudeCode, "2.0.77 (Claude Code)").contains("2.0.77 is too old"));
 	}
 
 	#[test]

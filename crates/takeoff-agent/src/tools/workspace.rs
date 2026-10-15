@@ -159,7 +159,11 @@ pub fn add_overlay(ctx: &mut ToolCtx, a: AddOverlayArgs) -> Result<ToolOutput, S
 			let v = ctx.view(v)?;
 			(v.page, view_box_to_page(&v, b)?)
 		}
-		(Some(_), None) => return Err("view needs box (where the overlay goes, read off that view)".into()),
+		// No box: cover what that view shows.
+		(Some(v), None) => {
+			let v = ctx.view(v)?;
+			(v.page, (v.region.x, v.region.y, v.region.w, v.region.h))
+		}
 		_ => {
 			let page = ctx.page_or_current(a.page)?;
 			let r = a.region.unwrap_or(RegionArg { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });

@@ -147,7 +147,7 @@ pub fn definitions() -> Vec<ToolDef> {
 			"view": view_id(), "page": {"type": "integer"}, "region": region(), "label": {"type": "string"}}), &[]),
 		def(
 			"add_overlay",
-			"Lay a picture over part of a page, semi-transparent, to SHOW something on the sheet: a map, zones, a heat map, a diagram, a colour-coded correlation, a legend. Give exactly one source: svg (markup; it is stretched to fill the box, so set its viewBox to the box's shape), html (markup, rendered to a transparent image with headless Chrome/Edge), or file (a .svg/.png/.jpg/.html in the workspace). Place it with view + box (read off that view) or page + region (page fractions; default the whole page). Not a quantity: overlays never change counts or measurements. Attaches a check render.",
+			"Lay a picture over part of a page, semi-transparent, to SHOW something on the sheet: a map, zones, a heat map, a diagram, a colour-coded correlation, a legend. Give exactly one source: svg (markup; it is stretched to fill the box, so set its viewBox to the box's shape), html (markup, rendered to a transparent image with headless Chrome/Edge), or file (a .svg/.png/.jpg/.html in the workspace). Place it with view + box (read off that view; view alone covers what it shows) or page + region (page fractions; default the whole page). Not a quantity: overlays never change counts or measurements. Attaches a check render.",
 			json!({
 				"view": view_id(), "box": bx(), "page": {"type": "integer"}, "region": region(),
 				"svg": {"type": "string", "description": "SVG markup."},

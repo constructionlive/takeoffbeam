@@ -56,6 +56,8 @@ struct ChannelInfo {
 	/// Model id → None while testing, then the result.
 	tests: HashMap<String, Option<Result<String, String>>>,
 	custom_model: String,
+	/// `Update` pressed: None while it runs, then its result.
+	update: Option<Option<Result<String, String>>>,
 }
 
 /// "claude:opus" → (Claude Code, "opus").
@@ -849,7 +851,7 @@ impl AiPanel {
 						widgets::hint(ui, p, "Checking…");
 					});
 				}
-				(Some(st), Some(Ok(models))) if st.exe.is_some() && st.signed_in != Some(false) => {
+				(Some(st), Some(Ok(models))) if st.exe.is_some() && st.signed_in != Some(false) && !st.outdated => {
 					let account = st.account.clone().unwrap_or_default();
 					for m in models {
 						let id = format!("{}:{}", ch.key(), m.id);
@@ -862,6 +864,8 @@ impl AiPanel {
 				(Some(st), _) => {
 					let (title, sub) = if st.exe.is_none() {
 						(format!("Install {}", ch.name()), format!("Then use {plan} here"))
+					} else if st.outdated {
+						(format!("Update {}", ch.name()), format!("{} is too old (needs {} or newer)", st.version.clone().unwrap_or_default(), ch.min_version()))
 					} else if st.signed_in == Some(false) {
 						(format!("Sign in to {}", ch.name()), "Takes a minute — we'll show you how".to_string())
 					} else {
@@ -1253,7 +1257,7 @@ impl AiPanel {
 			let (info, ctx) = (info.clone(), ctx.clone());
 			std::thread::spawn(move || {
 				let st = channel::status(ch);
-				let models = st.exe.as_ref().filter(|_| st.signed_in != Some(false)).map(|exe| channel::models(ch, exe));
+				let models = st.exe.as_ref().filter(|_| st.signed_in != Some(false) && !st.outdated).map(|exe| channel::models(ch, exe));
 				let mut i = info.lock();
 				i.status = Some(st);
 				i.models = models;
@@ -1303,6 +1307,41 @@ impl AiPanel {
 									ui.ctx().copy_text(cmd.to_string());
 								}
 							});
+						}
+						return;
+					}
+					Some(st) if st.outdated => {
+						let version = st.version.clone().unwrap_or_default();
+						ui.label(RichText::new(format!("{} Installed {version} · too old (Takeoff Desk needs {} or newer)", i::CIRCLE_ALERT, ch.min_version())).color(p.warning));
+						ui.horizontal(|ui| {
+							match &i.update {
+								Some(None) => {
+									ui.spinner();
+									widgets::hint(ui, p, &format!("Updating {}…", ch.name()));
+								}
+								_ => {
+									if ui.button(format!("{}  Update", i::REFRESH_CW)).clicked() {
+										i.update = Some(None);
+										let (info, ctx, exe) = (info.clone(), ui.ctx().clone(), st.exe.clone().expect("installed"));
+										std::thread::spawn(move || {
+											let r = channel::update(ch, &exe);
+											let mut g = info.lock();
+											g.update = Some(Some(r));
+											// Look again: version, sign-in, models.
+											g.status = None;
+											ctx.request_repaint();
+										});
+									}
+									widgets::hint(ui, p, "or in a terminal:");
+									ui.label(RichText::new(ch.update_command()).monospace().size(12.0));
+									if ui.small_button(i::COPY).on_hover_text("Copy").clicked() {
+										ui.ctx().copy_text(ch.update_command().to_string());
+									}
+								}
+							}
+						});
+						if let Some(Some(Err(e))) = &i.update {
+							ui.label(RichText::new(format!("Update failed: {e}")).size(11.5).color(p.danger));
 						}
 						return;
 					}
