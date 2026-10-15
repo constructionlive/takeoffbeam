@@ -57,6 +57,8 @@ pub struct Canvas {
 	pub show_badges: bool,
 	/// The last scroll came from a trackpad (pixel deltas), not a mouse wheel.
 	trackpad: bool,
+	/// The person zoomed or panned this frame (stops following the AI).
+	pub user_moved: bool,
 	/// Rasterized overlays by id: (content key, texture or why it failed).
 	overlay_tex: HashMap<String, (u64, Result<egui::TextureHandle, String>)>,
 }
@@ -83,6 +85,7 @@ impl Default for Canvas {
 			cursor_page: None,
 			show_badges: true,
 			trackpad: false,
+			user_moved: false,
 			overlay_tex: HashMap::new(),
 		}
 	}
@@ -214,6 +217,9 @@ impl Canvas {
 		}) {
 			self.trackpad = t;
 		}
+		if hovered && (zoom != 1.0 || scroll != Vec2::ZERO) {
+			self.user_moved = true;
+		}
 		if hovered {
 			let anchor = hover_pos.unwrap_or(doc.canvas_rect.center());
 			if zoom != 1.0 {
@@ -239,6 +245,7 @@ impl Canvas {
 			if resp.dragged() {
 				doc.pan += resp.drag_delta();
 				doc.touch_view();
+				self.user_moved = true;
 				ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
 			}
 			if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {

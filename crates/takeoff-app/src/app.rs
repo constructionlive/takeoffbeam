@@ -159,6 +159,7 @@ impl TakeoffApp {
 		self.ai.others = self.docs.iter().filter(|d| d.loaded).map(|d| takeoff_agent::tools::OtherDrawing { path: d.path.clone(), doc: d.doc.clone(), page: d.page }).collect();
 		let doc = self.docs.get_mut(active);
 		self.ai.poll(&ctx, &mut self.canvas, doc, &self.settings);
+		self.follow_agent();
 		self.shortcuts(&ctx);
 		self.handle_canvas_requests();
 		self.updater.tick(&ctx);
@@ -590,7 +591,32 @@ impl TakeoffApp {
 		egui::CentralPanel::default().frame(egui::Frame::new().fill(p.canvas)).show(ui, |ui| {
 			if let Some(d) = self.docs.get_mut(active) {
 				let (snap, wheel) = (self.settings.snap, self.settings.wheel_zooms);
+				self.canvas.user_moved = false;
 				self.canvas.ui(ui, d, p, snap, wheel);
+				// Panning or zooming yourself while the AI works stops following it.
+				if self.canvas.user_moved && self.settings.follow_agent && self.ai.busy() {
+					self.settings.follow_agent = false;
+					self.settings.save();
+				}
+				if self.settings.follow_agent && self.ai.busy() {
+					let rect = ui.max_rect();
+					let mut stop = false;
+					egui::Area::new(egui::Id::new("follow-pill")).fixed_pos(egui::pos2(rect.center().x - 120.0, rect.top() + 48.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+						egui::Frame::popup(&ui.ctx().global_style()).inner_margin(egui::Margin::symmetric(12, 6)).corner_radius(14).show(ui, |ui| {
+							ui.horizontal(|ui| {
+								ui.label(RichText::new(i::CROSSHAIR).font(theme::icon_font(13.0)).color(p.accent));
+								ui.label(RichText::new("Following the AI").font(theme::semibold(12.5)));
+								if ui.small_button("Stop").clicked() {
+									stop = true;
+								}
+							});
+						});
+					});
+					if stop {
+						self.settings.follow_agent = false;
+						self.settings.save();
+					}
+				}
 				// Revision-compare bar.
 				let mut close_compare = false;
 				if let Some(c) = &mut d.compare {
@@ -631,6 +657,23 @@ impl TakeoffApp {
 				}
 			}
 		});
+	}
+
+	/// Take the canvas to where the AI is looking (switching tabs if needed).
+	fn follow_agent(&mut self) {
+		let Some((path, page, region)) = self.ai.follow_request.take() else { return };
+		if !self.settings.follow_agent {
+			return;
+		}
+		if let Some(idx) = self.docs.iter().position(|d| d.path == path) {
+			// A tab not shown yet doesn't know the canvas size; it's the same canvas.
+			let canvas = self.docs.get(self.active).map(|d| d.canvas_rect).filter(|r| r.area() > 0.0);
+			if let (Some(c), true) = (canvas, self.docs[idx].canvas_rect.area() <= 0.0) {
+				self.docs[idx].canvas_rect = c;
+			}
+			self.active = idx;
+			self.docs[idx].zoom_to(page, region);
+		}
 	}
 
 	fn status_bar(&mut self, ui: &mut egui::Ui, p: &Palette) {
@@ -1546,6 +1589,15 @@ impl TakeoffApp {
 		self.docs.get_mut(self.active)
 	}
 	#[doc(hidden)]
+	/// As if the AI just looked at `region` of `page` in `path` (Follow).
+	pub fn debug_agent_looked(&mut self, path: PathBuf, page: u32, region: (f64, f64, f64, f64)) {
+		self.ai.follow_request = Some((path, page, region));
+	}
+
+	pub fn debug_active_path(&self) -> Option<PathBuf> {
+		self.docs.get(self.active).map(|d| d.path.clone())
+	}
+
 	pub fn debug_canvas(&mut self) -> &mut Canvas {
 		&mut self.canvas
 	}

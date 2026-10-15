@@ -24,6 +24,10 @@ It sees the sheet the way you do: same layers, same markups, numbered badges inc
   gets a shell in its **workspace folder** (default `Documents/Takeoff Desk/Workspace`) for
   scripts, data and overlay files. Turn that off, or pick another folder, in *Models* → *Let the AI
   run commands in a workspace folder*. Commands run as you, on this computer.
+- **Follow it.** Turn on **Follow** (the crosshair at the top of the AI tab) and the canvas goes
+  to the exact page and area the AI is looking at, switching tabs when it works in another
+  drawing. A "Following the AI" pill shows while it works. Click **Stop** there, click the
+  crosshair again, or just pan or zoom yourself to stop following.
 - **Stop** ends the run at the next step.
 
 The prompt line knows your context: the current page, the visible region when you are zoomed in,
@@ -160,6 +164,10 @@ never sees or stores your credentials.
   come from the app over a private local MCP bridge, so marks appear live and are undoable like any
   other.
 - Usage counts against your plan's limits, not construction.live credits.
+- Not installed or not signed in? *Subscriptions* has **Install** and **Sign in** buttons. Each
+  opens a Terminal window that runs the installer or the sign-in, which continues in your browser.
+  The card updates by itself when it's done. Codex installs with npm, so it needs
+  [Node.js](https://nodejs.org) first; the card says so and links to it.
 - Needs **Claude Code 2.1.40** or newer, or **Codex 0.140.0** or newer. With an older one,
   *Subscriptions* says so and offers **Update** (`claude update`, or npm for Codex). Turns don't
   start until it's updated.

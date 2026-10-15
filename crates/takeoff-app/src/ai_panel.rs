@@ -59,6 +59,10 @@ struct ChannelInfo {
 	custom_model: String,
 	/// `Update` pressed: None while it runs, then its result.
 	update: Option<Option<Result<String, String>>>,
+	/// Install / Sign in opened a terminal at this time: check again every few seconds.
+	waiting: Option<Instant>,
+	/// The terminal couldn't be opened.
+	launch_error: Option<String>,
 }
 
 /// "claude:opus" → (Claude Code, "opus").
@@ -84,6 +88,10 @@ pub struct AiPanel {
 	pub others: Vec<takeoff_agent::tools::OtherDrawing>,
 	/// Views attached to the message being written.
 	attached: Vec<ViewAttachment>,
+	/// Where the AI just looked, for the app to follow: (drawing, page, region).
+	pub follow_request: Option<(PathBuf, u32, (f64, f64, f64, f64))>,
+	/// Last automatic subscription re-check (while waiting on Install / Sign in).
+	last_channel_poll: Option<Instant>,
 	sessions: HashMap<PathBuf, Arc<Mutex<ChatSession>>>,
 	turn: Option<TurnHandle>,
 	turn_doc: Option<PathBuf>,
@@ -118,6 +126,8 @@ impl AiPanel {
 		let mut s = Self {
 			others: Vec::new(),
 			attached: Vec::new(),
+			follow_request: None,
+			last_channel_poll: None,
 			sessions: HashMap::new(),
 			turn: None,
 			turn_doc: None,
@@ -509,7 +519,10 @@ impl AiPanel {
 				AgentEvent::TextDelta(t) => self.live.text.push_str(&t),
 				AgentEvent::ReasoningDelta(t) => self.live.reasoning.push_str(&t),
 				AgentEvent::ToolStarted { call_id, name, args: _ } => {
-					self.live.text.push_str("\n\n");
+					// One paragraph break between bursts of text, however many steps run in between.
+					if !self.live.text.trim().is_empty() && !self.live.text.ends_with("\n\n") {
+						self.live.text.push_str("\n\n");
+					}
 					self.live.steps.push(Step { call_id, name, summary: String::new(), ok: None, thumb: None });
 				}
 				AgentEvent::ToolFinished { call_id, name, ok, summary, image } => {
@@ -526,9 +539,16 @@ impl AiPanel {
 					}
 				}
 				AgentEvent::Viewport { page, region, label, drawing } => {
-					// Only on the drawing it is working in (it may be in another tab).
 					let here = doc.as_deref().map(|d| d.path.clone());
-					if drawing.is_none() || drawing == here {
+					let target = drawing.clone().or_else(|| self.turn_doc.clone());
+					if settings.follow_agent {
+						// The app switches tab and zooms there; show the frame there too.
+						if let Some(t) = target {
+							self.follow_request = Some((t, page, region));
+						}
+						canvas.ghost = Some((page, region, label, Instant::now()));
+					} else if drawing.is_none() || drawing == here {
+						// Only on the drawing it is working in (it may be in another tab).
 						canvas.ghost = Some((page, region, label, Instant::now()));
 					}
 				}
@@ -592,6 +612,10 @@ impl AiPanel {
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 				if let Some(d) = &doc {
 					let path = d.path.clone();
+					if widgets::icon_button(ui, p, i::CROSSHAIR, if settings.follow_agent { "Following the AI: the canvas shows what it looks at. Click (or pan yourself) to stop." } else { "Follow the AI: show the page and area it is looking at" }, settings.follow_agent).clicked() {
+						settings.follow_agent = !settings.follow_agent;
+						settings.save();
+					}
 					let r = widgets::icon_button(ui, p, i::HISTORY, "Past conversations", false);
 					egui::Popup::menu(&r).show(|ui| self.history_menu(ui, &path, p));
 					if widgets::icon_button(ui, p, i::PLUS, "New conversation (this one stays in history)", false).clicked() && self.turn.is_none() {
@@ -1309,6 +1333,18 @@ impl AiPanel {
 		if self.channels.values().any(|i| { let i = i.lock(); i.status.is_none() && !i.loading }) {
 			self.refresh_channels(ui.ctx());
 		}
+		// While someone finishes an install or sign-in in Terminal, look again
+		// every few seconds (for up to 10 minutes) so the card turns ready by itself.
+		let waiting: Vec<Instant> = self.channels.values().filter_map(|i| i.lock().waiting).collect();
+		if let Some(&since) = waiting.iter().max() {
+			if since.elapsed() < Duration::from_secs(600) {
+				if self.last_channel_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(4)) && !self.channels.values().any(|i| i.lock().loading) {
+					self.last_channel_poll = Some(Instant::now());
+					self.refresh_channels(ui.ctx());
+				}
+				ui.ctx().request_repaint_after(Duration::from_secs(1));
+			}
+		}
 		ui.horizontal(|ui| {
 			widgets::hint(ui, p, "Use the Claude or ChatGPT plan you already pay for. Takeoff Desk runs Claude Code or Codex on this computer and hands it the drawing tools; usage counts against your plan's limits, not construction.live credits.");
 		});
@@ -1337,14 +1373,35 @@ impl AiPanel {
 					}
 					Some(st) if st.exe.is_none() => {
 						ui.label(RichText::new(format!("{} Not installed", i::CIRCLE_ALERT)).color(p.text2));
-						widgets::hint(ui, p, "Install it in a terminal, then sign in once and press Check again:");
-						for cmd in [ch.install_command(), ch.login_command()] {
+						if ch.needs_node() && !channel::npm_available() {
+							// Codex installs with npm, which comes with Node.js.
+							widgets::hint(ui, p, "Codex installs with npm, which comes with Node.js. Install Node.js first (the LTS version), then come back here.");
+							if ui.button(format!("{}  Get Node.js", i::EXTERNAL_LINK)).clicked() {
+								let _ = open::that("https://nodejs.org/en/download");
+								i.waiting = Some(Instant::now());
+							}
+						} else {
 							ui.horizontal(|ui| {
-								ui.label(RichText::new(cmd).monospace().size(12.0));
-								if ui.small_button(i::COPY).on_hover_text("Copy").clicked() {
-									ui.ctx().copy_text(cmd.to_string());
+								if ui.button(format!("{}  Install {}", i::DOWNLOAD, ch.name())).on_hover_text("Opens a Terminal window that runs the installer").clicked() {
+									i.launch_error = channel::open_in_terminal(ch.install_command()).err();
+									i.waiting = Some(Instant::now());
+								}
+								if i.waiting.is_some() {
+									ui.spinner();
+									widgets::hint(ui, p, "Finish in the Terminal window; this updates by itself.");
 								}
 							});
+						}
+						ui.horizontal(|ui| {
+							widgets::hint(ui, p, "Or in a terminal:");
+							let cmd = ch.install_command();
+							ui.label(RichText::new(cmd).monospace().size(12.0));
+							if ui.small_button(i::COPY).on_hover_text("Copy").clicked() {
+								ui.ctx().copy_text(cmd.to_string());
+							}
+						});
+						if let Some(e) = &i.launch_error {
+							ui.label(RichText::new(format!("Couldn't open a terminal: {e}")).size(11.5).color(p.danger));
 						}
 						return;
 					}
@@ -1388,16 +1445,32 @@ impl AiPanel {
 						match st.signed_in {
 							Some(false) => {
 								ui.label(RichText::new(format!("{} Installed {version} · not signed in", i::CIRCLE_ALERT)).color(p.warning));
+								let exe = st.exe.clone().expect("installed");
 								ui.horizontal(|ui| {
-									widgets::hint(ui, p, "Sign in once in a terminal:");
+									if ui.button(format!("{}  Sign in", i::LOG_IN)).on_hover_text("Opens a Terminal window; it takes you to your browser to sign in").clicked() {
+										i.launch_error = channel::open_in_terminal(&channel::login_command_for(ch, &exe)).err();
+										i.waiting = Some(Instant::now());
+									}
+									if i.waiting.is_some() {
+										ui.spinner();
+										widgets::hint(ui, p, "Finish signing in; this updates by itself.");
+									}
+								});
+								ui.horizontal(|ui| {
+									widgets::hint(ui, p, "Or in a terminal:");
 									ui.label(RichText::new(ch.login_command()).monospace().size(12.0));
 									if ui.small_button(i::COPY).on_hover_text("Copy").clicked() {
 										ui.ctx().copy_text(ch.login_command().to_string());
 									}
 								});
+								if let Some(e) = &i.launch_error {
+									ui.label(RichText::new(format!("Couldn't open a terminal: {e}")).size(11.5).color(p.danger));
+								}
 								return;
 							}
 							_ => {
+								// Done: stop the automatic re-checks.
+								i.waiting = None;
 								let who = st.account.clone().map(|a| format!(" · {a}")).unwrap_or_default();
 								ui.label(RichText::new(format!("{} Ready {version}{who}", i::CIRCLE_CHECK)).color(p.success));
 							}
@@ -1677,6 +1750,7 @@ fn user_bubble(ui: &mut egui::Ui, p: &Palette, text: &str) {
 /// Light markdown: headings, bullets, numbered lists, **bold**, `code`, tables as monospace.
 pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
 	let mut in_code = false;
+	let mut blank = false;
 	for line in text.lines() {
 		let t = line.trim_end();
 		if t.trim_start().starts_with("```") {
@@ -1689,9 +1763,14 @@ pub fn markdown(ui: &mut egui::Ui, p: &Palette, text: &str) {
 			continue;
 		}
 		if t.trim().is_empty() {
-			ui.add_space(4.0);
+			// Runs of blank lines take the space of one.
+			if !blank {
+				ui.add_space(4.0);
+			}
+			blank = true;
 			continue;
 		}
+		blank = false;
 		let (indent, body) = {
 			let trimmed = t.trim_start();
 			((t.len() - trimmed.len()) as f32 * 4.0, trimmed)
@@ -1831,6 +1910,31 @@ mod tests {
 
 	/// A long user message must wrap inside the panel, and must not shift the
 	/// transcript that follows it off the panel's left edge.
+	/// Render `text` as markdown in a `width`-wide column; the space it used.
+	fn markdown_size(text: &str, width: f32) -> egui::Rect {
+		let ctx = egui::Context::default();
+		theme::install_fonts(&ctx);
+		let p = theme::palette(&ctx);
+		let col = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 4000.0));
+		let mut used = egui::Rect::NOTHING;
+		let _ = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0))), ..Default::default() }, |ui| {
+			let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(col).layout(egui::Layout::top_down(egui::Align::Min)));
+			markdown(&mut ui, &p, text);
+			used = ui.min_rect();
+		});
+		used
+	}
+
+	#[test]
+	fn blank_line_runs_take_one_gap_and_prose_fits_the_width() {
+		let one = markdown_size("Starting with page 44.\n\nPage 45 next.", 300.0);
+		let many = markdown_size(&format!("Starting with page 44.{}Page 45 next.", "\n\n".repeat(200)), 300.0);
+		assert!((many.height() - one.height()).abs() < 1.0, "200 tool-step breaks add no extra gap: {} vs {}", many.height(), one.height());
+		let prose = "1. Mainline Proposed Tracks 1, 2, 3 on RP-03 to RP-23 (pages 44–64)\n- **Track 1** runs the full sheet (144+00→159+00); Proposed Tracks 2 and 3 begin at STA 156+11. Measuring those and loading page 46 at the same time.\n### Scope 3 it is — all proposed tracks, in feet";
+		let r = markdown_size(prose, 300.0);
+		assert!(r.width() <= 300.5, "prose wraps inside the column (no sideways scroll): {}", r.width());
+	}
+
 	#[test]
 	fn long_user_bubble_stays_inside_the_panel() {
 		let ctx = egui::Context::default();

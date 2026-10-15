@@ -46,6 +46,8 @@ pub struct Settings {
 	pub ai_workspace_on: bool,
 	/// That folder; empty = [`default_workspace`].
 	pub ai_workspace: String,
+	/// The canvas follows the page and area the AI is looking at.
+	pub follow_agent: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +76,7 @@ impl Default for Settings {
 			skipped_update: String::new(),
 			ai_workspace_on: true,
 			ai_workspace: String::new(),
+			follow_agent: false,
 		}
 	}
 }

@@ -191,3 +191,18 @@ fn looks_at_the_attached_view_first() {
 	assert!(text.contains('1'), "one square (at 300,100) is in that area: {text}");
 	std::fs::remove_file(pdf).ok();
 }
+
+/// Install / Sign in open a visible terminal running the command.
+#[test]
+#[ignore]
+fn opens_a_terminal_that_runs_the_command() {
+	let marker = std::env::temp_dir().join(format!("takeoff-terminal-{}", std::process::id()));
+	let _ = std::fs::remove_file(&marker);
+	channel::open_in_terminal(&format!("touch '{}'", marker.display())).unwrap();
+	let t = std::time::Instant::now();
+	while !marker.exists() && t.elapsed() < Duration::from_secs(20) {
+		std::thread::sleep(Duration::from_millis(200));
+	}
+	assert!(marker.exists(), "the terminal ran the command");
+	std::fs::remove_file(marker).ok();
+}

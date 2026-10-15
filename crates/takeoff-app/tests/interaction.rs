@@ -273,3 +273,49 @@ fn select_drags_pan_and_shift_drag_selects() {
 	pump(&mut h, 30);
 	assert!(app(&mut h).debug_doc().unwrap().zoom > zoom1 * 1.05, "mouse wheel zooms");
 }
+
+/// Follow the AI: the canvas goes to the tab, page and area it looks at;
+/// with Follow off, it stays put.
+#[test]
+fn follow_the_ai_switches_tab_and_zooms() {
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		eprintln!("sample drawing missing; skipping");
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-follow-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let (a, b) = (dir.join("A.pdf"), dir.join("B.pdf"));
+	std::fs::copy(&pdf, &a).unwrap();
+	std::fs::copy(&pdf, &b).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let ctx = h.ctx.clone();
+	app(&mut h).open(a.clone(), &ctx);
+	app(&mut h).open(b.clone(), &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	pump(&mut h, 5);
+	assert_eq!(app(&mut h).debug_active_path(), Some(b.clone()));
+
+	// Follow off: nothing moves.
+	app(&mut h).settings.follow_agent = false;
+	app(&mut h).debug_agent_looked(a.clone(), 1, (0.4, 0.4, 0.1, 0.1));
+	pump(&mut h, 2);
+	assert_eq!(app(&mut h).debug_active_path(), Some(b.clone()));
+
+	// Follow on: switches to A and zooms in on that area.
+	app(&mut h).settings.follow_agent = true;
+	let zoom_before = app(&mut h).debug_doc().unwrap().zoom;
+	app(&mut h).debug_agent_looked(a.clone(), 1, (0.4, 0.4, 0.1, 0.1));
+	pump(&mut h, 2);
+	assert_eq!(app(&mut h).debug_active_path(), Some(a.clone()), "switched to the drawing the AI looked at");
+	let d = app(&mut h).debug_doc().unwrap();
+	assert!(d.zoom > zoom_before * 2.0, "zoomed in on the area: {zoom_before} → {}", d.zoom);
+	let centre = d.to_page(d.canvas_rect.center());
+	assert!((centre.x - 0.45).abs() < 0.02 && (centre.y - 0.45).abs() < 0.02, "centred on it: {centre:?}");
+	app(&mut h).settings.follow_agent = false;
+}

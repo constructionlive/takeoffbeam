@@ -80,9 +80,15 @@ impl Channel {
 
 	pub fn install_command(self) -> &'static str {
 		match self {
+			Channel::ClaudeCode if cfg!(windows) => "irm https://claude.ai/install.ps1 | iex",
 			Channel::ClaudeCode => "curl -fsSL https://claude.ai/install.sh | bash",
 			Channel::Codex => "npm install -g @openai/codex",
 		}
+	}
+
+	/// Installing it needs Node.js (npm) first.
+	pub fn needs_node(self) -> bool {
+		self == Channel::Codex
 	}
 
 	/// Oldest release with everything Takeoff Desk uses (`--tools`, `--mcp-config`,
@@ -303,6 +309,53 @@ fn installed_version(exe: &Path) -> Option<String> {
 	let line = r.stdout.lines().next()?.trim().to_string();
 	CACHE.get_or_init(Default::default).lock().insert(key, line.clone());
 	Some(line)
+}
+
+/// npm is on this computer (Codex installs with it).
+pub fn npm_available() -> bool {
+	search_dirs().into_iter().any(|d| d.join(if cfg!(windows) { "npm.cmd" } else { "npm" }).is_file())
+}
+
+/// Run `command` in a new, visible terminal window, so installers and sign-in
+/// flows can show progress, open the browser and ask questions.
+pub fn open_in_terminal(command: &str) -> Result<(), String> {
+	if cfg!(target_os = "macos") {
+		// A .command file opens in Terminal and runs: no permission to script
+		// Terminal is needed (a signed, hardened app would need one for AppleScript).
+		let file = std::env::temp_dir().join(format!("takeoff-desk-{}.command", random_token()));
+		std::fs::write(&file, format!("#!/bin/bash -l\n{command}\necho\necho 'Done. You can close this window and go back to Takeoff Desk.'\n")).map_err(|e| e.to_string())?;
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+		}
+		Command::new("open").args(["-a", "Terminal"]).arg(&file).spawn().map_err(|e| e.to_string())?;
+	} else if cfg!(windows) {
+		Command::new("cmd").args(["/C", "start", "Takeoff Desk", "powershell", "-NoExit", "-Command", command]).spawn().map_err(|e| e.to_string())?;
+	} else {
+		let term = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]
+			.into_iter()
+			.find(|t| search_dirs().iter().any(|d| d.join(t).is_file()))
+			.ok_or("no terminal app found — run the command yourself")?;
+		let mut c = Command::new(term);
+		if term == "gnome-terminal" {
+			c.args(["--", "bash", "-lc"]);
+		} else {
+			c.args(["-e", "bash", "-lc"]);
+		}
+		c.arg(format!("{command}; exec bash")).spawn().map_err(|e| e.to_string())?;
+	}
+	Ok(())
+}
+
+/// The sign-in command for an installed CLI, with its full path (the
+/// terminal's PATH may not include where it was found).
+pub fn login_command_for(channel: Channel, exe: &Path) -> String {
+	let quoted = if cfg!(windows) { format!("& \"{}\"", exe.display()) } else { format!("'{}'", exe.display().to_string().replace('\'', "'\\''")) };
+	match channel {
+		Channel::ClaudeCode => format!("{quoted} auth login"),
+		Channel::Codex => format!("{quoted} login"),
+	}
 }
 
 /// Update the CLI in place (`claude update` / npm). Returns its output.
@@ -1387,6 +1440,21 @@ mod tests {
 		assert!(p.contains("Estimator: Count outlets") && p.contains("Bench: Found 4."));
 		assert!(!p.contains("Now switches"));
 		assert_eq!(history_preamble(&ChatSession::new()), "");
+	}
+
+	#[test]
+	fn install_and_login_commands_fit_the_platform() {
+		let c = Channel::ClaudeCode.install_command();
+		if cfg!(windows) {
+			assert!(c.contains("install.ps1"));
+		} else {
+			assert!(c.contains("install.sh"));
+		}
+		assert!(Channel::Codex.needs_node() && !Channel::ClaudeCode.needs_node());
+		let l = login_command_for(Channel::ClaudeCode, Path::new("/Users/o'brien/.local/bin/claude"));
+		if !cfg!(windows) {
+			assert_eq!(l, "'/Users/o'\\''brien/.local/bin/claude' auth login");
+		}
 	}
 
 	#[test]
