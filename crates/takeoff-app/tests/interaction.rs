@@ -480,3 +480,36 @@ fn menu_bar_opens() {
 		}
 	}
 }
+
+/// The AI tab's header: the model picker and its buttons don't overlap.
+#[test]
+fn ai_header_buttons_do_not_overlap_the_picker() {
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		eprintln!("sample drawing missing; skipping");
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-header-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let copy = dir.join("plan.pdf");
+	std::fs::copy(&pdf, &copy).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let ctx = h.ctx.clone();
+	app(&mut h).open(copy, &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	app(&mut h).debug_right_tab(2);
+	pump(&mut h, 5);
+	let picker = h.get_by_label_contains("Model:").rect();
+	for tip in ["New conversation", "Past conversations", "Follow the AI"] {
+		let b = h.get_by_label_contains(tip).rect();
+		assert!(!b.intersects(picker), "'{tip}' button overlaps the picker: {b:?} vs {picker:?}");
+		assert!((b.center().y - picker.center().y).abs() < 4.0, "'{tip}' sits in the picker's row");
+	}
+	assert!(picker.top() < 200.0, "the header stays at the top of the panel: {picker:?}");
+	assert!(picker.height() <= 44.0, "one row: {picker:?}");
+}

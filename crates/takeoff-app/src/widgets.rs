@@ -8,6 +8,8 @@ use crate::theme::{self, Palette};
 pub fn icon_button(ui: &mut Ui, p: &Palette, icon: &str, tip: &str, active: bool) -> Response {
 	let size = Vec2::splat(30.0);
 	let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+	// The tooltip doubles as its name for screen readers (the icon has none).
+	resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tip));
 	let painter = ui.painter();
 	if active {
 		painter.rect_filled(rect, 4.0, if p.dark { Color32::from_rgb(0x3A, 0x22, 0x18) } else { Color32::from_rgb(0xFD, 0xE7, 0xDD) });

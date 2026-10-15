@@ -595,28 +595,9 @@ impl AiPanel {
 		let (label, dot, state) = self.model_label(settings);
 		let (badge, glyph) = provider_badge(&settings.model);
 		ui.horizontal(|ui| {
-			let w = (ui.available_width() - 72.0).max(180.0);
-			let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::click());
-			let a11y = format!("Model: {label}");
-			r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &a11y));
-			let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
-			let painter = ui.painter();
-			painter.rect(rect, 6.0, if r.hovered() || open { p.hover } else { p.card }, egui::Stroke::new(1.0, if open { p.accent } else { p.border }), egui::StrokeKind::Inside);
-			let b = egui::Rect::from_min_size(rect.left_center() + egui::vec2(8.0, -13.0), egui::vec2(26.0, 26.0));
-			painter.rect_filled(b, 6.0, badge);
-			painter.text(b.center(), egui::Align2::CENTER_CENTER, glyph, theme::icon_font(14.0), Color32::WHITE);
-			let tx = b.right() + 10.0;
-			let max_w = rect.right() - 28.0 - tx;
-			let g = painter.layout(label.clone(), theme::semibold(13.0), p.text, max_w);
-			painter.galley(egui::pos2(tx, rect.top() + 5.0), g, p.text);
-			painter.circle_filled(egui::pos2(tx + 4.0, rect.bottom() - 11.0), 3.5, dot);
-			painter.text(egui::pos2(tx + 12.0, rect.bottom() - 11.0), egui::Align2::LEFT_CENTER, if state.is_empty() { "pick one to start" } else { state }, egui::FontId::proportional(11.5), p.text2);
-			painter.text(rect.right_center() - egui::vec2(14.0, 0.0), egui::Align2::CENTER_CENTER, if open { i::CHEVRON_UP } else { i::CHEVRON_DOWN }, theme::icon_font(14.0), p.text2);
-			if r.hovered() {
-				ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-			}
-			egui::Popup::menu(&r).width(w.max(360.0)).show(|ui| self.model_menu(ui, settings, p));
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+				// The pill's height, so the icons centre on it.
+				ui.set_min_height(40.0);
 				if let Some(d) = &doc {
 					let path = d.path.clone();
 					if widgets::icon_button(ui, p, i::CROSSHAIR, if settings.follow_agent { "Following the AI: the canvas shows what it looks at. Click (or pan yourself) to stop." } else { "Follow the AI: show the page and area it is looking at" }, settings.follow_agent).clicked() {
@@ -629,6 +610,28 @@ impl AiPanel {
 						self.new_conversation(&path);
 					}
 				}
+				// The icons go first (right to left); the pill takes what is left.
+				let w = ui.available_width().max(120.0);
+				let (rect, r) = ui.allocate_exact_size(egui::vec2(w, 40.0), egui::Sense::click());
+				let a11y = format!("Model: {label}");
+				r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &a11y));
+				let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
+				let painter = ui.painter();
+				painter.rect(rect, 6.0, if r.hovered() || open { p.hover } else { p.card }, egui::Stroke::new(1.0, if open { p.accent } else { p.border }), egui::StrokeKind::Inside);
+				let b = egui::Rect::from_min_size(rect.left_center() + egui::vec2(8.0, -13.0), egui::vec2(26.0, 26.0));
+				painter.rect_filled(b, 6.0, badge);
+				painter.text(b.center(), egui::Align2::CENTER_CENTER, glyph, theme::icon_font(14.0), Color32::WHITE);
+				let tx = b.right() + 10.0;
+				let max_w = rect.right() - 28.0 - tx;
+				let g = painter.layout(label.clone(), theme::semibold(13.0), p.text, max_w);
+				painter.galley(egui::pos2(tx, rect.top() + 5.0), g, p.text);
+				painter.circle_filled(egui::pos2(tx + 4.0, rect.bottom() - 11.0), 3.5, dot);
+				painter.text(egui::pos2(tx + 12.0, rect.bottom() - 11.0), egui::Align2::LEFT_CENTER, if state.is_empty() { "pick one to start" } else { state }, egui::FontId::proportional(11.5), p.text2);
+				painter.text(rect.right_center() - egui::vec2(14.0, 0.0), egui::Align2::CENTER_CENTER, if open { i::CHEVRON_UP } else { i::CHEVRON_DOWN }, theme::icon_font(14.0), p.text2);
+				if r.hovered() {
+					ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+				}
+				egui::Popup::menu(&r).width(w.max(360.0)).show(|ui| self.model_menu(ui, settings, p));
 			});
 		});
 		if let ServerState::Starting = self.server_state {
