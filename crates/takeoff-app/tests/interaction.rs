@@ -15,7 +15,11 @@ use takeoff_core::*;
 type H = Harness<'static, Option<TakeoffApp>>;
 
 fn harness() -> H {
-	Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+	harness_sized(900.0)
+}
+
+fn harness_sized(height: f32) -> H {
+	Harness::builder().with_size(egui::vec2(1440.0, height)).with_step_dt(1.0 / 60.0).build_ui_state(
 		|ui, state: &mut Option<TakeoffApp>| {
 			let Some(app) = state.as_mut() else {
 				let mut s = Settings::default();
@@ -212,10 +216,10 @@ fn item_card_toggles_and_menu_opens() {
 	std::fs::remove_dir_all(dir).ok();
 }
 
-/// Select tool navigation: dragging empty sheet pans, Shift-drag box-selects,
-/// a trackpad pans while a mouse wheel zooms.
+/// Select tool: dragging empty sheet box-selects (Bluebeam), a trackpad pans
+/// while a mouse wheel zooms.
 #[test]
-fn select_drags_pan_and_shift_drag_selects() {
+fn select_drag_box_selects_and_trackpad_pans() {
 	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
 	if !pdf.exists() {
 		eprintln!("sample drawing missing; skipping");
@@ -237,29 +241,25 @@ fn select_drags_pan_and_shift_drag_selects() {
 	pump(&mut h, 5);
 	let c = app(&mut h).debug_doc().unwrap().canvas_rect.center();
 
-	// One mark to select later.
+	// One mark to select.
 	app(&mut h).debug_canvas().set_tool(Tool::Count);
 	click(&mut h, c);
 	app(&mut h).debug_canvas().set_tool(Tool::Select);
 	click(&mut h, c + egui::vec2(200.0, 150.0)); // empty: clears selection
 	assert!(app(&mut h).debug_doc().unwrap().selection.is_empty());
 
-	// Plain drag on empty sheet pans and selects nothing.
-	let (pan0, zoom0) = { let d = app(&mut h).debug_doc().unwrap(); (d.pan, d.zoom) };
-	drag(&mut h, c + egui::vec2(200.0, 150.0), c + egui::vec2(80.0, 90.0));
-	let d = app(&mut h).debug_doc().unwrap();
-	let moved = d.pan - pan0;
-	assert!((moved.x + 120.0).abs() < 4.0 && (moved.y + 60.0).abs() < 4.0, "panned by the drag: {moved:?}");
-	assert_eq!(d.zoom, zoom0);
-	assert!(d.selection.is_empty(), "a pan selects nothing");
-
-	// Shift-drag around the mark (which moved with the pan) box-selects it.
-	let m = c + moved;
-	h.input_mut().modifiers = Modifiers::SHIFT;
-	drag(&mut h, m - egui::vec2(60.0, 60.0), m + egui::vec2(60.0, 60.0));
-	h.input_mut().modifiers = Modifiers::NONE;
+	// A plain drag around the mark box-selects it, without moving the view.
+	let pan0 = app(&mut h).debug_doc().unwrap().pan;
+	drag(&mut h, c - egui::vec2(60.0, 60.0), c + egui::vec2(60.0, 60.0));
 	pump(&mut h, 2);
-	assert_eq!(app(&mut h).debug_doc().unwrap().selection.len(), 1, "box-selected the mark");
+	let d = app(&mut h).debug_doc().unwrap();
+	assert_eq!(d.selection.len(), 1, "box-selected the mark");
+	assert_eq!(d.pan, pan0, "a drag in Select doesn't pan");
+
+	// A drag over empty sheet selects nothing.
+	drag(&mut h, c + egui::vec2(150.0, 100.0), c + egui::vec2(250.0, 160.0));
+	pump(&mut h, 2);
+	assert!(app(&mut h).debug_doc().unwrap().selection.is_empty());
 
 	// Trackpad (point deltas) pans; a mouse wheel (line deltas) zooms.
 	let (pan1, zoom1) = { let d = app(&mut h).debug_doc().unwrap(); (d.pan, d.zoom) };
@@ -318,4 +318,87 @@ fn follow_the_ai_switches_tab_and_zooms() {
 	let centre = d.to_page(d.canvas_rect.center());
 	assert!((centre.x - 0.45).abs() < 0.02 && (centre.y - 0.45).abs() < 0.02, "centred on it: {centre:?}");
 	app(&mut h).settings.follow_agent = false;
+}
+
+fn click_with(h: &mut H, pos: Pos2, mods: Modifiers) {
+	h.input_mut().modifiers = mods;
+	h.event(Event::PointerMoved(pos));
+	h.step();
+	h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers: mods });
+	h.step();
+	h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: mods });
+	h.step();
+	h.input_mut().modifiers = Modifiers::NONE;
+	pump(h, 25);
+}
+
+/// Markups list: Shift-click selects a range, ⌘-click toggles, Select all
+/// takes every shown row, Delete removes the selection.
+#[test]
+fn markups_list_multi_select() {
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		eprintln!("sample drawing missing; skipping");
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-list-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let copy = dir.join("plan.pdf");
+	std::fs::copy(&pdf, &copy).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let ctx = h.ctx.clone();
+	app(&mut h).open(copy, &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	pump(&mut h, 5);
+	let c = app(&mut h).debug_doc().unwrap().canvas_rect.center();
+	app(&mut h).debug_canvas().set_tool(Tool::Count);
+	for k in 0..4 {
+		click(&mut h, c + egui::vec2(k as f32 * 40.0, 0.0));
+	}
+	app(&mut h).debug_canvas().set_tool(Tool::Select);
+	pump(&mut h, 3);
+	// The list's rows (the subject column), top to bottom — read again before
+	// each click, since the selection bar above the table changes with the selection.
+	let list_top = app(&mut h).debug_doc().unwrap().canvas_rect.bottom();
+	let rows = |h: &mut H| -> Vec<Pos2> {
+		let mut r: Vec<Pos2> = h.query_all_by_label("Count 1").map(|n| n.rect().center()).filter(|p| p.y > list_top).collect();
+		r.sort_by(|a, b| a.y.total_cmp(&b.y));
+		r
+	};
+	assert_eq!(rows(&mut h).len(), 4, "four rows in the list");
+	let sel = |h: &mut H| app(h).debug_doc().unwrap().selection.len();
+
+	let r = rows(&mut h)[0];
+	click(&mut h, r);
+	assert_eq!(sel(&mut h), 1);
+	let r = rows(&mut h)[1];
+	click_with(&mut h, r, Modifiers::SHIFT);
+	assert_eq!(sel(&mut h), 2, "Shift-click selects the range from the first row");
+	let r = rows(&mut h)[0];
+	click_with(&mut h, r, Modifiers::COMMAND);
+	assert_eq!(sel(&mut h), 1, "⌘-click takes a row out");
+	let r = rows(&mut h)[0];
+	click_with(&mut h, r, Modifiers::COMMAND);
+	assert_eq!(sel(&mut h), 2, "⌘-click puts it back");
+	let r = rows(&mut h)[1];
+	click(&mut h, r);
+	assert_eq!(sel(&mut h), 1, "a plain click selects just that row");
+
+	// Buttons in the list's selection bar (below the canvas).
+	let in_list = |h: &mut H, label: &str| -> Pos2 {
+		h.query_all_by_label_contains(label).map(|n| n.rect().center()).find(|p| p.y > list_top).unwrap_or_else(|| panic!("no '{label}' button in the list"))
+	};
+	let b = in_list(&mut h, "Select all (4)");
+	click(&mut h, b);
+	assert_eq!(sel(&mut h), 4);
+	in_list(&mut h, "4 selected");
+	let b = in_list(&mut h, "Delete 4");
+	click(&mut h, b);
+	assert_eq!(app(&mut h).debug_doc().unwrap().doc.lock().data.marks.len(), 0, "deleted all four");
+	assert_eq!(sel(&mut h), 0);
 }

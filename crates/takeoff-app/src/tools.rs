@@ -131,7 +131,7 @@ impl Tool {
 
 	pub fn hint(self) -> &'static str {
 		match self {
-			Tool::Select => "Click to select, drag a markup to move it, drag empty sheet to pan, Shift-drag to box-select",
+			Tool::Select => "Click to select, drag to move, drag on empty space to box-select. Pan: two fingers, or hold Space",
 			Tool::Pan => "Drag to pan. Tip: hold Space with any tool",
 			Tool::Count => "Click each symbol to count it",
 			Tool::Length | Tool::Perimeter => "Click points · double-click or Enter to finish · Backspace removes a point · Shift = 45°",

@@ -4,7 +4,7 @@
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 use takeoff_core::list::{rows, MarkupRow, RowKind};
-use takeoff_core::{FieldDef, ItemRef};
+use takeoff_core::{FieldDef, ItemRef, MarkStatus};
 
 use crate::docstate::OpenDoc;
 use crate::icons as i;
@@ -36,11 +36,13 @@ pub struct MarkupsList {
 	only_pending: bool,
 	new_column: String,
 	cache: Option<(u64, Vec<MarkupRow>)>,
+	/// Last row clicked without Shift: where a Shift-click range starts.
+	anchor: Option<String>,
 }
 
 impl Default for MarkupsList {
 	fn default() -> Self {
-		Self { filter: String::new(), sort: SortBy::Page, ascending: true, scope: Scope::All, only_pending: false, new_column: String::new(), cache: None }
+		Self { filter: String::new(), sort: SortBy::Page, ascending: true, scope: Scope::All, only_pending: false, new_column: String::new(), cache: None, anchor: None }
 	}
 }
 
@@ -123,6 +125,7 @@ impl MarkupsList {
 		if !self.ascending {
 			shown.reverse();
 		}
+		self.selection_bar(ui, doc, &shown, p);
 		if shown.is_empty() {
 			widgets::hint(ui, p, "No markups match. Everything you or the AI draw shows up here.");
 			return action;
@@ -140,7 +143,10 @@ impl MarkupsList {
 			}
 		};
 		let mut go_to: Option<(u32, ItemRef, bool)> = None;
+		let mut clicked: Option<usize> = None;
 		let text_h = 24.0;
+		// Selectable labels would take the click; the row should get it wherever you click.
+		ui.style_mut().interaction.selectable_labels = false;
 		let mut table = TableBuilder::new(ui)
 			.striped(true)
 			.resizable(true)
@@ -249,21 +255,37 @@ impl MarkupsList {
 					});
 					let resp = row.response();
 					if resp.clicked() {
-						go_to = Some((r.page, r.item.clone(), false));
+						clicked = Some(row.index());
 					}
 					if resp.double_clicked() {
 						go_to = Some((r.page, r.item.clone(), true));
 					}
 				});
 			});
+		if let Some(k) = clicked {
+			let mods = ui.input(|i| i.modifiers);
+			let id = shown[k].item.id().to_string();
+			if mods.shift {
+				// Range from the last plain/⌘ click to this row, added to the selection.
+				let from = self.anchor.as_ref().and_then(|a| shown.iter().position(|r| r.item.id() == a)).unwrap_or(k);
+				let (lo, hi) = (from.min(k), from.max(k));
+				doc.selection.extend(shown[lo..=hi].iter().map(|r| r.item.id().to_string()));
+			} else if mods.command || mods.ctrl {
+				// Toggle one row.
+				if !doc.selection.remove(&id) {
+					doc.selection.insert(id.clone());
+				}
+				self.anchor = Some(id);
+			} else {
+				go_to = Some((shown[k].page, shown[k].item.clone(), false));
+				self.anchor = Some(id);
+			}
+		}
 		if let Some((page, item, zoom)) = go_to {
-			let multi = ui.input(|i| i.modifiers.command || i.modifiers.shift);
 			if page != doc.page {
 				doc.go_to_page(page);
 			}
-			if !multi {
-				doc.selection.clear();
-			}
+			doc.selection.clear();
 			doc.selection.insert(item.id().to_string());
 			if zoom {
 				if let Some(b) = item_bounds(doc, &item) {
@@ -272,6 +294,41 @@ impl MarkupsList {
 			}
 		}
 		action
+	}
+
+	/// Select all / clear, and what to do with the selection.
+	fn selection_bar(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc, shown: &[MarkupRow], p: &Palette) {
+		let n = doc.selection.len();
+		ui.horizontal_wrapped(|ui| {
+			if ui.button(format!("{}  Select all ({})", i::SQUARE_DASHED, shown.len())).on_hover_text("Select every row shown (filters apply)").clicked() {
+				doc.selection = shown.iter().map(|r| r.item.id().to_string()).collect();
+			}
+			if n == 0 {
+				widgets::hint(ui, p, "Click a row to select · ⌘-click to add or remove · Shift-click for a range");
+				return;
+			}
+			ui.label(RichText::new(format!("{n} selected")).font(theme::semibold(12.5)).color(p.accent));
+			let pending = {
+				let d = doc.doc.lock();
+				d.data.marks.iter().filter(|m| doc.selection.contains(&m.id) && m.status == MarkStatus::Pending).count()
+			};
+			if pending > 0 && ui.button(format!("{}  Confirm {pending}", i::CHECK)).clicked() {
+				let ids = doc.selection.clone();
+				doc.doc.lock().edit("Confirm", |d| {
+					for m in d.marks.iter_mut().filter(|m| ids.contains(&m.id)) {
+						m.status = MarkStatus::Confirmed;
+					}
+				});
+			}
+			if ui.button(RichText::new(format!("{}  Delete {n}", i::TRASH_2)).color(p.danger)).on_hover_text("Undo brings them back (⌘Z). Locked items are kept.").clicked() {
+				let ids = doc.selection.clone();
+				doc.doc.lock().edit("Delete", |d| d.delete_ids(&ids));
+				doc.selection.clear();
+			}
+			if ui.button(format!("{}  Clear", i::X)).clicked() {
+				doc.selection.clear();
+			}
+		});
 	}
 }
 

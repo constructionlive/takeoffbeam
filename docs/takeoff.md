@@ -50,8 +50,9 @@ vectors, so snapping quietly does nothing there.
 ## Editing
 
 - **Select (V):**
-  - Click an item to select it. Drag on empty sheet to pan; **Shift**- or **⌘**-drag to box-select.
-    Shift/⌘-click adds to the selection.
+  - Click an item, or drag on empty space to box-select. Shift/⌘ adds to the selection.
+  - In the **Markups** list: click a row, ⌘-click to add or remove one, Shift-click for a range, or
+    **Select all** (follows the filters). The bar above the list confirms or deletes the selection.
   - Drag a selection to move it, and nudge it with the arrow keys (Shift = ×10).
   - Drag a vertex to reshape, or a corner to resize.
   - **Delete** removes the selection.

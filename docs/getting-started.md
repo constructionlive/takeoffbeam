@@ -42,9 +42,9 @@ drawing opens in a tab. Your takeoff is saved automatically, about a second afte
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Navigate:** with **Select**, drag empty sheet to pan. On a trackpad, two fingers pan and pinch
-  zooms. A mouse wheel zooms (*Preferences → Mouse wheel* can make it scroll instead). Hold
-  **Space** or drag with the wheel button to pan with any tool. **PgUp/PgDn** for pages, **⌘0** to
+- **Navigate:** on a trackpad, two fingers pan and pinch zooms. A mouse wheel zooms
+  (*Preferences → Mouse wheel* can make it scroll instead). Hold **Space** or drag with the wheel
+  button to pan with any tool. **PgUp/PgDn** for pages, **⌘0** to
   fit the page.
 - **Tools:** each has a one-letter shortcut. Press **?** for the full list.
 - **Light or dark:** *View → Theme* (it follows the system by default).

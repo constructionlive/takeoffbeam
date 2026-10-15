@@ -1021,14 +1021,13 @@ impl Canvas {
 					doc.doc.lock().begin_gesture("Move");
 					self.drag = Some(Drag::Move { last: raw, moved: false });
 				}
-				// Empty sheet: drag pans, Shift/⌘-drag draws a selection box.
-				None if mods.shift || cmd => {
-					self.drag = Some(Drag::Marquee { start: origin });
-				}
+				// Empty sheet: box-select (Shift/⌘ adds to the selection). Pan with
+				// two fingers, Space-drag or the wheel button.
 				None => {
-					doc.pan += resp.drag_delta();
-					doc.touch_view();
-					self.drag = Some(Drag::Pan);
+					if !mods.shift && !cmd {
+						doc.selection.clear();
+					}
+					self.drag = Some(Drag::Marquee { start: origin });
 				}
 			}
 		}
@@ -1136,8 +1135,6 @@ impl Canvas {
 				ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
 			} else if self.hit(doc, pos).is_some() {
 				ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-			} else if !(mods.shift || cmd) && doc.page_rect().contains(pos) {
-				ui.ctx().set_cursor_icon(CursorIcon::Grab);
 			}
 		}
 	}
