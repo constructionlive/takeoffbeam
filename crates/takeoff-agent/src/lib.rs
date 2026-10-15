@@ -24,7 +24,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 pub use agent::{start_turn, MAX_STEPS};
-pub use session::{ChatSession, ExternalThread, Role, TranscriptEntry};
+pub use session::{ChatSession, ExternalThread, Role, TranscriptEntry, ViewAttachment};
 
 /// Which model to talk to.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +50,8 @@ pub struct AgentContext {
 	pub workspace: Option<PathBuf>,
 	/// The estimator's other open drawings, which the agent can switch to.
 	pub others: Vec<tools::OtherDrawing>,
+	/// Areas attached to this message.
+	pub attachments: Vec<ViewAttachment>,
 }
 
 #[derive(Debug, Clone)]

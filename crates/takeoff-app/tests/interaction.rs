@@ -211,3 +211,65 @@ fn item_card_toggles_and_menu_opens() {
 	assert_eq!(app(&mut h).debug_canvas().tool, Tool::Select, "menu click didn't activate the card");
 	std::fs::remove_dir_all(dir).ok();
 }
+
+/// Select tool navigation: dragging empty sheet pans, Shift-drag box-selects,
+/// a trackpad pans while a mouse wheel zooms.
+#[test]
+fn select_drags_pan_and_shift_drag_selects() {
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		eprintln!("sample drawing missing; skipping");
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-nav-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let copy = dir.join("plan.pdf");
+	std::fs::copy(&pdf, &copy).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let ctx = h.ctx.clone();
+	app(&mut h).open(copy, &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	pump(&mut h, 5);
+	let c = app(&mut h).debug_doc().unwrap().canvas_rect.center();
+
+	// One mark to select later.
+	app(&mut h).debug_canvas().set_tool(Tool::Count);
+	click(&mut h, c);
+	app(&mut h).debug_canvas().set_tool(Tool::Select);
+	click(&mut h, c + egui::vec2(200.0, 150.0)); // empty: clears selection
+	assert!(app(&mut h).debug_doc().unwrap().selection.is_empty());
+
+	// Plain drag on empty sheet pans and selects nothing.
+	let (pan0, zoom0) = { let d = app(&mut h).debug_doc().unwrap(); (d.pan, d.zoom) };
+	drag(&mut h, c + egui::vec2(200.0, 150.0), c + egui::vec2(80.0, 90.0));
+	let d = app(&mut h).debug_doc().unwrap();
+	let moved = d.pan - pan0;
+	assert!((moved.x + 120.0).abs() < 4.0 && (moved.y + 60.0).abs() < 4.0, "panned by the drag: {moved:?}");
+	assert_eq!(d.zoom, zoom0);
+	assert!(d.selection.is_empty(), "a pan selects nothing");
+
+	// Shift-drag around the mark (which moved with the pan) box-selects it.
+	let m = c + moved;
+	h.input_mut().modifiers = Modifiers::SHIFT;
+	drag(&mut h, m - egui::vec2(60.0, 60.0), m + egui::vec2(60.0, 60.0));
+	h.input_mut().modifiers = Modifiers::NONE;
+	pump(&mut h, 2);
+	assert_eq!(app(&mut h).debug_doc().unwrap().selection.len(), 1, "box-selected the mark");
+
+	// Trackpad (point deltas) pans; a mouse wheel (line deltas) zooms.
+	let (pan1, zoom1) = { let d = app(&mut h).debug_doc().unwrap(); (d.pan, d.zoom) };
+	h.event(Event::PointerMoved(c));
+	h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -80.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE });
+	pump(&mut h, 30);
+	let d = app(&mut h).debug_doc().unwrap();
+	assert_eq!(d.zoom, zoom1, "trackpad scroll does not zoom");
+	assert!((d.pan.y - pan1.y).abs() > 20.0, "trackpad scroll pans: {:?} → {:?}", pan1, d.pan);
+	h.event(Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, 3.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE });
+	pump(&mut h, 30);
+	assert!(app(&mut h).debug_doc().unwrap().zoom > zoom1 * 1.05, "mouse wheel zooms");
+}

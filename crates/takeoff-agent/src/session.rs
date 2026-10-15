@@ -11,6 +11,39 @@ use crate::llm::{image_part, ToolCall};
 
 pub const MAX_LIVE_IMAGES: usize = 6;
 
+/// An area of a drawing the estimator attached to a message ("look here").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ViewAttachment {
+	pub drawing: std::path::PathBuf,
+	pub page: u32,
+	/// Page fractions (x, y, w, h).
+	pub region: (f64, f64, f64, f64),
+}
+
+impl ViewAttachment {
+	/// What the model is told about one attachment.
+	pub fn describe(&self, n: usize, this_drawing: &std::path::Path) -> String {
+		let (x, y, w, h) = self.region;
+		let file = self.drawing.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+		let other = if self.drawing != this_drawing { " (another open drawing: switch_drawing to it first)" } else { "" };
+		format!("A{n}: \"{file}\"{other}, page {}, region x={x:.4} y={y:.4} w={w:.4} h={h:.4}", self.page)
+	}
+}
+
+/// The note sent with a message that has attachments.
+pub fn attachments_note(atts: &[ViewAttachment], this_drawing: &std::path::Path) -> String {
+	if atts.is_empty() {
+		return String::new();
+	}
+	let lines: Vec<String> = atts.iter().enumerate().map(|(i, a)| a.describe(i + 1, this_drawing)).collect();
+	format!(
+		"\n[The estimator attached {} view{} of the drawing: exactly what they are asking about. Look at each FIRST with view (that page and region) before answering, and keep your work to those areas unless they say otherwise.\n{}]",
+		atts.len(),
+		if atts.len() == 1 { "" } else { "s" },
+		lines.join("\n")
+	)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolImage {
 	pub png: Arc<Vec<u8>>,
@@ -27,6 +60,9 @@ pub enum Msg {
 		/// Viewer state at send time (page, selection) — sent, not shown.
 		#[serde(default, skip_serializing_if = "Option::is_none")]
 		context: Option<String>,
+		/// Areas the estimator attached (shown as chips under the message).
+		#[serde(default, skip_serializing_if = "Vec::is_empty")]
+		attachments: Vec<ViewAttachment>,
 	},
 	Assistant {
 		#[serde(default)]
@@ -65,6 +101,7 @@ pub struct TranscriptEntry {
 	pub tool_name: Option<String>,
 	pub tool_ok: Option<bool>,
 	pub image_png: Option<Vec<u8>>,
+	pub attachments: Vec<ViewAttachment>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -104,10 +141,10 @@ impl ChatSession {
 		let mut out = Vec::new();
 		for m in &self.messages {
 			match m {
-				Msg::User { text, .. } => out.push(TranscriptEntry { role: Role::User, text: text.clone(), tool_name: None, tool_ok: None, image_png: None }),
+				Msg::User { text, attachments, .. } => out.push(TranscriptEntry { role: Role::User, text: text.clone(), tool_name: None, tool_ok: None, image_png: None, attachments: attachments.clone() }),
 				Msg::Assistant { text, .. } => {
 					if !text.trim().is_empty() {
-						out.push(TranscriptEntry { role: Role::Assistant, text: text.clone(), tool_name: None, tool_ok: None, image_png: None });
+						out.push(TranscriptEntry { role: Role::Assistant, text: text.clone(), tool_name: None, tool_ok: None, image_png: None, attachments: vec![] });
 					}
 				}
 				Msg::Tool { name, text, ok, thumb, .. } => out.push(TranscriptEntry {
@@ -116,6 +153,7 @@ impl ChatSession {
 					tool_name: Some(name.clone()),
 					tool_ok: Some(*ok),
 					image_png: thumb.as_ref().map(|t| t.as_ref().clone()),
+					attachments: vec![],
 				}),
 			}
 		}
@@ -157,7 +195,7 @@ impl ChatSession {
 				flush(&mut out, &mut pending_images);
 			}
 			match m {
-				Msg::User { text, context } => {
+				Msg::User { text, context, .. } => {
 					let content = match context {
 						Some(c) => format!("{c}\n\n{text}"),
 						None => text.clone(),
@@ -247,7 +285,7 @@ mod tests {
 	#[test]
 	fn images_follow_the_tool_run_and_old_ones_are_evicted() {
 		let mut s = ChatSession::new();
-		s.messages.push(Msg::User { text: "count".into(), context: Some("[page 1]".into()) });
+		s.messages.push(Msg::User { text: "count".into(), context: Some("[page 1]".into()), attachments: vec![] });
 		for round in 0..4 {
 			s.messages.push(Msg::Assistant { text: String::new(), reasoning: String::new(), tool_calls: vec![ToolCall { id: format!("c{round}a"), name: "view".into(), arguments: "{}".into() }, ToolCall { id: format!("c{round}b"), name: "view".into(), arguments: "{}".into() }] });
 			for k in ["a", "b"] {
@@ -279,5 +317,27 @@ mod tests {
 		let Msg::Tool { images, image_captions, .. } = &back.messages[0] else { panic!() };
 		assert!(images.is_empty());
 		assert_eq!(image_captions, &vec!["cap".to_string()]);
+	}
+
+	#[test]
+	fn attachments_are_spelled_out_and_old_chats_still_load() {
+		let here = std::path::Path::new("/d/Plans.pdf");
+		let a = ViewAttachment { drawing: here.into(), page: 2, region: (0.1, 0.2, 0.3, 0.25) };
+		let b = ViewAttachment { drawing: "/d/Electrical.pdf".into(), page: 1, region: (0.0, 0.0, 1.0, 1.0) };
+		let note = attachments_note(&[a.clone(), b], here);
+		assert!(note.contains("attached 2 views"), "{note}");
+		assert!(note.contains("A1: \"Plans.pdf\", page 2, region x=0.1000 y=0.2000 w=0.3000 h=0.2500"), "{note}");
+		assert!(note.contains("A2: \"Electrical.pdf\" (another open drawing: switch_drawing to it first)"), "{note}");
+		assert_eq!(attachments_note(&[], here), "");
+
+		let mut s = ChatSession::new();
+		s.messages.push(Msg::User { text: "what is this".into(), context: Some(note.clone()), attachments: vec![a.clone()] });
+		let back: ChatSession = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+		assert_eq!(back.transcript()[0].attachments, vec![a]);
+		let api = back.api_messages("sys", "m", true);
+		assert!(api.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("attached 2 views") && c.ends_with("what is this"))));
+		// Saved before attachments existed.
+		let old: ChatSession = serde_json::from_str(r#"{"messages":[{"role":"user","text":"hi"}]}"#).unwrap();
+		assert!(old.transcript()[0].attachments.is_empty());
 	}
 }

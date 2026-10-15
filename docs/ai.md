@@ -30,6 +30,11 @@ The prompt line knows your context: the current page, the visible region when yo
 and your selection. That makes "count these", "measure the selected wall" and "what's this note"
 work.
 
+To point it at one area, zoom to it and press **Attach view** above the prompt. The area becomes a
+chip on your message, and the AI looks at exactly that area first and keeps its work there. Pan
+or zoom and attach again to add more areas, even from other pages or open drawings. Click a chip
+to go back to its area, in the prompt or later in the chat.
+
 ## Choosing a model
 
 Click the model button at the top of the AI tab (or *Choose a model…*) to open **Models**.

@@ -55,6 +55,8 @@ pub struct Canvas {
 	pub requests: Vec<CanvasRequest>,
 	pub cursor_page: Option<Point>,
 	pub show_badges: bool,
+	/// The last scroll came from a trackpad (pixel deltas), not a mouse wheel.
+	trackpad: bool,
 	/// Rasterized overlays by id: (content key, texture or why it failed).
 	overlay_tex: HashMap<String, (u64, Result<egui::TextureHandle, String>)>,
 }
@@ -80,6 +82,7 @@ impl Default for Canvas {
 			requests: vec![],
 			cursor_page: None,
 			show_badges: true,
+			trackpad: false,
 			overlay_tex: HashMap::new(),
 		}
 	}
@@ -201,12 +204,23 @@ impl Canvas {
 	fn navigate(&mut self, ui: &egui::Ui, resp: &egui::Response, doc: &mut OpenDoc, wheel_zooms: bool) {
 		let hovered = resp.hovered() || resp.dragged();
 		let (zoom, scroll, mods, hover_pos) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.modifiers, i.pointer.hover_pos()));
+		// Trackpads scroll in points, mouse wheels in lines. Remember which, since
+		// smoothed wheel scrolling carries on for frames after the event.
+		if let Some(t) = ui.input(|i| {
+			i.raw.events.iter().rev().find_map(|e| match e {
+				egui::Event::MouseWheel { unit, .. } => Some(*unit == egui::MouseWheelUnit::Point),
+				_ => None,
+			})
+		}) {
+			self.trackpad = t;
+		}
 		if hovered {
 			let anchor = hover_pos.unwrap_or(doc.canvas_rect.center());
 			if zoom != 1.0 {
 				doc.zoom_at(anchor, zoom);
 			} else if scroll != Vec2::ZERO {
-				if wheel_zooms && !mods.shift && !mods.alt {
+				// Two fingers on a trackpad move the sheet (pinch zooms), like every Mac app.
+				if wheel_zooms && !self.trackpad && !mods.shift && !mods.alt {
 					let factor = (scroll.y / 400.0).exp();
 					doc.zoom_at(anchor, factor);
 				} else {
@@ -1000,11 +1014,14 @@ impl Canvas {
 					doc.doc.lock().begin_gesture("Move");
 					self.drag = Some(Drag::Move { last: raw, moved: false });
 				}
-				None => {
-					if !mods.shift && !cmd {
-						doc.selection.clear();
-					}
+				// Empty sheet: drag pans, Shift/⌘-drag draws a selection box.
+				None if mods.shift || cmd => {
 					self.drag = Some(Drag::Marquee { start: origin });
+				}
+				None => {
+					doc.pan += resp.drag_delta();
+					doc.touch_view();
+					self.drag = Some(Drag::Pan);
 				}
 			}
 		}
@@ -1112,6 +1129,8 @@ impl Canvas {
 				ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
 			} else if self.hit(doc, pos).is_some() {
 				ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+			} else if !(mods.shift || cmd) && doc.page_rect().contains(pos) {
+				ui.ctx().set_cursor_icon(CursorIcon::Grab);
 			}
 		}
 	}

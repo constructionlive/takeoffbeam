@@ -38,6 +38,7 @@ fn live_turn(ch: &Channel) -> ChannelTurn {
 		workdir: std::env::temp_dir().join("takeoff-channel-live"),
 		workspace: std::env::var_os("TAKEOFF_LIVE_WORKSPACE").map(std::path::PathBuf::from),
 		others: vec![],
+		attachments: vec![],
 		sweeps: None,
 		current_page: 1,
 		visible_region: None,
@@ -148,5 +149,45 @@ fn shell_and_overlay_through_the_cli() {
 	let d = doc.lock();
 	assert_eq!(d.data.overlays.len(), 1, "one overlay added");
 	assert_eq!(d.data.overlays[0].label.as_deref(), Some("Test"));
+	std::fs::remove_file(pdf).ok();
+}
+
+/// An attached view: the model's first look is at that area.
+#[test]
+#[ignore]
+fn looks_at_the_attached_view_first() {
+	assert!(std::env::var_os("TAKEOFF_BRIDGE_EXE").is_some(), "set TAKEOFF_BRIDGE_EXE to a built takeoff-desk");
+	let ch = Channel::ClaudeCode;
+	let pdf = fixture();
+	let doc = Arc::new(Mutex::new(Document::new(TakeoffData::default(), vec![(792.0, 612.0)], "AI")));
+	let host = ToolHost::start(doc.clone(), pdf.clone()).unwrap();
+	let region = (0.3, 0.1, 0.25, 0.3);
+	let turn = ChannelTurn {
+		exe: channel::find_exe(ch).expect("CLI installed"),
+		attachments: vec![takeoff_agent::ViewAttachment { drawing: pdf.clone(), page: 1, region }],
+		..live_turn(&ch)
+	};
+	let h = channel::start_turn(&host, Arc::new(Mutex::new(ChatSession::new())), turn, "How many black squares are in the area I attached? Answer with the number only.".into());
+	let mut first_view = None;
+	let mut text = String::new();
+	loop {
+		match h.events.recv_timeout(Duration::from_secs(600)).expect("turn timed out") {
+			AgentEvent::TextDelta(t) => text.push_str(&t),
+			AgentEvent::ToolStarted { name, args, .. } => {
+				println!("→ {name} {args}");
+				if name == "view" && first_view.is_none() {
+					first_view = Some(args);
+				}
+			}
+			AgentEvent::Error(e) => panic!("{e}"),
+			AgentEvent::Done { .. } => break,
+			_ => {}
+		}
+	}
+	println!("answer: {text}");
+	let v = first_view.expect("looked at it");
+	let x = v["region"]["x"].as_f64().expect("viewed a region, not the whole page");
+	assert!((x - region.0).abs() < 0.02, "first view at the attached area: {v}");
+	assert!(text.contains('1'), "one square (at 300,100) is in that area: {text}");
 	std::fs::remove_file(pdf).ok();
 }

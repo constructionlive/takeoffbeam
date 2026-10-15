@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText, ScrollArea, TextureHandle};
 use parking_lot::Mutex;
 use takeoff_agent::channel::{self, Channel, ChannelModel, ChannelStatus, ToolHost};
-use takeoff_agent::{AgentContext, AgentEvent, ChatSession, ProviderConfig, Role, TurnHandle};
+use takeoff_agent::{AgentContext, AgentEvent, ChatSession, ProviderConfig, Role, TurnHandle, ViewAttachment};
 use takeoff_models::catalog;
 use takeoff_models::download::{DownloadHandle, DownloadState};
 use takeoff_models::fit::{CacheType, FitReport, Verdict};
@@ -45,6 +45,7 @@ struct Live {
 	transcript_len: usize,
 	/// The message being answered.
 	asked: String,
+	asked_attachments: Vec<ViewAttachment>,
 }
 
 /// What we know about one subscription CLI (filled in by background threads).
@@ -81,6 +82,8 @@ enum CloudFlow {
 pub struct AiPanel {
 	/// The other open tabs, set by the app each frame; the agent can switch to them.
 	pub others: Vec<takeoff_agent::tools::OtherDrawing>,
+	/// Views attached to the message being written.
+	attached: Vec<ViewAttachment>,
 	sessions: HashMap<PathBuf, Arc<Mutex<ChatSession>>>,
 	turn: Option<TurnHandle>,
 	turn_doc: Option<PathBuf>,
@@ -114,6 +117,7 @@ impl AiPanel {
 		let cloud = takeoff_cloud::token::load();
 		let mut s = Self {
 			others: Vec::new(),
+			attached: Vec::new(),
 			sessions: HashMap::new(),
 			turn: None,
 			turn_doc: None,
@@ -387,9 +391,10 @@ impl AiPanel {
 					provider,
 					workspace: settings.workspace(),
 					others: self.others.iter().filter(|o| o.path != doc.path).cloned().collect(),
+					attachments: self.attached.clone(),
 				};
 				let transcript_len = session.lock().transcript().len();
-				self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), ..Default::default() };
+				self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), asked_attachments: std::mem::take(&mut self.attached), ..Default::default() };
 				self.turn = Some(takeoff_agent::start_turn(session, ctx, text));
 				self.turn_doc = Some(doc.path.clone());
 				self.queued = None;
@@ -419,13 +424,14 @@ impl AiPanel {
 			workdir: channel_workdir(),
 			workspace: settings.workspace(),
 			others: self.others.iter().filter(|o| o.path != doc.path).cloned().collect(),
+			attachments: self.attached.clone(),
 			sweeps,
 			current_page: doc.page,
 			visible_region: visible_region(doc),
 			selected_ids: doc.selection.iter().cloned().collect(),
 		};
 		let transcript_len = session.lock().transcript().len();
-		self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), ..Default::default() };
+		self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), asked_attachments: std::mem::take(&mut self.attached), ..Default::default() };
 		self.turn = Some(channel::start_turn(&self.hosts[&doc.path], session, turn, text));
 		self.turn_doc = Some(doc.path.clone());
 		self.queued = None;
@@ -611,7 +617,8 @@ impl AiPanel {
 		let session = self.session(&doc.path);
 		let transcript = session.lock().transcript();
 		let avail = ui.available_height();
-		let composer_h = 118.0;
+		let composer_h = if self.attached.is_empty() { 118.0 } else { 146.0 };
+		let mut jump: Option<ViewAttachment> = None;
 		// Both directions: text still wraps to the panel width, but anything that
 		// can't (a wide table line, an image) scrolls instead of being cut off.
 		ScrollArea::both().stick_to_bottom(true).auto_shrink(false).max_height((avail - composer_h).max(80.0)).show(ui, |ui| {
@@ -658,6 +665,7 @@ impl AiPanel {
 					Role::User => {
 						flush(ui, &mut tool_run, &mut self.thumbs);
 						user_bubble(ui, p, &e.text);
+						attachment_chips(ui, p, &e.attachments, &doc.path, &mut jump);
 					}
 					Role::Assistant => {
 						flush(ui, &mut tool_run, &mut self.thumbs);
@@ -678,6 +686,7 @@ impl AiPanel {
 			if self.turn.is_some() {
 				if !self.live.asked.is_empty() {
 					user_bubble(ui, p, &self.live.asked);
+					attachment_chips(ui, p, &self.live.asked_attachments, &doc.path, &mut jump);
 				}
 				// Finished steps fold away like they do once the turn is over; the
 				// running one shows as a single line.
@@ -742,7 +751,36 @@ impl AiPanel {
 				chip(ui, p, &format!("{} +{} open drawing{}", i::FILES, others.len(), if others.len() == 1 { "" } else { "s" }))
 					.on_hover_text(format!("The AI can also work in:\n{}", others.join("\n")));
 			}
+			// Attach what's on screen, so the AI works on exactly this area.
+			if ui.small_button(format!("{} Attach view", i::SCAN)).on_hover_text("Attach the area you're looking at. Pan or zoom and attach again for more areas — even on other pages or drawings.").clicked() {
+				let a = ViewAttachment { drawing: doc.path.clone(), page: doc.page, region: visible_region(doc).unwrap_or((0.0, 0.0, 1.0, 1.0)) };
+				if !self.attached.contains(&a) {
+					self.attached.push(a);
+				}
+			}
 		});
+		if !self.attached.is_empty() {
+			let mut remove = None;
+			ui.horizontal_wrapped(|ui| {
+				for (k, a) in self.attached.iter().enumerate() {
+					let r = chip(ui, p, &format!("{} {}", i::SCAN, attachment_label(a, &doc.path))).interact(egui::Sense::click());
+					if r.on_hover_text("Show this area").clicked() {
+						jump = Some(a.clone());
+					}
+					if ui.small_button(i::X).on_hover_text("Remove").clicked() {
+						remove = Some(k);
+					}
+				}
+			});
+			if let Some(k) = remove {
+				self.attached.remove(k);
+			}
+		}
+		if let Some(a) = jump.take() {
+			if a.drawing == doc.path {
+				doc.zoom_to(a.page, a.region);
+			}
+		}
 		let frame = egui::Frame::new().fill(p.card).stroke(egui::Stroke::new(1.0, p.border)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8));
 		frame.show(ui, |ui| {
 			let te = egui::TextEdit::multiline(&mut self.input)
@@ -1584,6 +1622,30 @@ fn tool_title(name: &str) -> String {
 		f.make_ascii_uppercase();
 	}
 	s
+}
+
+/// "p1 · 6% of the sheet", or "Other.pdf p2 · whole page".
+fn attachment_label(a: &ViewAttachment, here: &std::path::Path) -> String {
+	let area = a.region.2 * a.region.3;
+	let what = if area >= 0.95 { "whole page".to_string() } else { format!("{:.0}% of the sheet", (area * 100.0).max(1.0)) };
+	let file = if a.drawing == here { String::new() } else { format!("{} ", a.drawing.file_stem().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()) };
+	format!("{file}p{} · {what}", a.page)
+}
+
+/// A sent message's attachments; clicking one goes back to that area.
+fn attachment_chips(ui: &mut egui::Ui, p: &Palette, atts: &[ViewAttachment], here: &std::path::Path, jump: &mut Option<ViewAttachment>) {
+	if atts.is_empty() {
+		return;
+	}
+	ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+		for a in atts.iter().rev() {
+			let r = chip(ui, p, &format!("{} {}", i::SCAN, attachment_label(a, here))).interact(egui::Sense::click());
+			let tip = if a.drawing == here { "Show this area".to_string() } else { format!("In {}", a.drawing.display()) };
+			if r.on_hover_text(tip).clicked() {
+				*jump = Some(a.clone());
+			}
+		}
+	});
 }
 
 fn chip(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {

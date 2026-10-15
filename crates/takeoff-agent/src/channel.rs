@@ -708,6 +708,8 @@ pub struct ChannelTurn {
 	pub workspace: Option<PathBuf>,
 	/// The estimator's other open drawings.
 	pub others: Vec<tools::OtherDrawing>,
+	/// Areas attached to this message.
+	pub attachments: Vec<crate::ViewAttachment>,
 	/// Model for detect / calibrate / trace, which make their own vision
 	/// calls; None leaves them out of the tool list.
 	pub sweeps: Option<ProviderConfig>,
@@ -815,7 +817,8 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 		}
 	};
 	let _ = std::fs::create_dir_all(turn.cwd());
-	session.lock().messages.push(Msg::User { text: user_text.clone(), context: Some(ctx_line.clone()) });
+	let ctx_line = ctx_line + &crate::session::attachments_note(&turn.attachments, &shared.pdf);
+	session.lock().messages.push(Msg::User { text: user_text.clone(), context: Some(ctx_line.clone()), attachments: turn.attachments.clone() });
 	let pending = Arc::new(Mutex::new(String::new()));
 	let dialect_model = match (turn.model.as_str(), turn.channel) {
 		("", Channel::ClaudeCode) => "claude".to_string(),
@@ -1377,9 +1380,9 @@ mod tests {
 	#[test]
 	fn preamble_carries_earlier_turns_but_not_the_new_message() {
 		let mut s = ChatSession::new();
-		s.messages.push(Msg::User { text: "Count outlets".into(), context: None });
+		s.messages.push(Msg::User { text: "Count outlets".into(), context: None, attachments: vec![] });
 		s.messages.push(Msg::Assistant { text: "Found 4.".into(), reasoning: String::new(), tool_calls: vec![] });
-		s.messages.push(Msg::User { text: "Now switches".into(), context: None });
+		s.messages.push(Msg::User { text: "Now switches".into(), context: None, attachments: vec![] });
 		let p = history_preamble(&s);
 		assert!(p.contains("Estimator: Count outlets") && p.contains("Bench: Found 4."));
 		assert!(!p.contains("Now switches"));

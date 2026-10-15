@@ -104,7 +104,8 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 	}
 	let hidden: HashSet<String> = ctx.doc.lock().data.hidden_layers.iter().cloned().collect();
 	let _ = tctx.drawing.set_hidden_layers(&hidden);
-	session.lock().messages.push(Msg::User { text: user_text, context: Some(ctx_line) });
+	let ctx_line = ctx_line + &crate::session::attachments_note(&ctx.attachments, &ctx.pdf_path);
+	session.lock().messages.push(Msg::User { text: user_text, context: Some(ctx_line), attachments: ctx.attachments.clone() });
 	let tool_defs = openai_tools(tctx.workspace.is_some());
 	let mut steps = 0;
 	let mut failures_in_a_row = 0;
@@ -256,7 +257,7 @@ fn compact_if_needed(session: &Arc<Mutex<ChatSession>>, system: &str, p: &crate:
 
 fn msg_tokens(m: &Msg) -> u64 {
 	match m {
-		Msg::User { text, context } => (text.len() + context.as_ref().map_or(0, |c| c.len())) as u64 / 4 + 4,
+		Msg::User { text, context, .. } => (text.len() + context.as_ref().map_or(0, |c| c.len())) as u64 / 4 + 4,
 		Msg::Assistant { text, tool_calls, .. } => (text.len() + tool_calls.iter().map(|c| c.arguments.len() + c.name.len()).sum::<usize>()) as u64 / 4 + 4,
 		Msg::Tool { text, images, .. } => text.len() as u64 / 4 + images.len() as u64 * 1600 + 4,
 	}

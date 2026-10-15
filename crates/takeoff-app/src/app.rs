@@ -1197,7 +1197,7 @@ impl TakeoffApp {
 						ui.end_row();
 						ui.label("Mouse wheel");
 						ui.horizontal(|ui| {
-							ui.selectable_value(&mut self.settings.wheel_zooms, true, "Zooms");
+							ui.selectable_value(&mut self.settings.wheel_zooms, true, "Zooms").on_hover_text("A trackpad always pans with two fingers; pinch to zoom");
 							ui.selectable_value(&mut self.settings.wheel_zooms, false, "Scrolls (pinch / ⌘ to zoom)");
 						});
 						ui.end_row();

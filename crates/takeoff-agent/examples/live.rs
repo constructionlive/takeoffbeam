@@ -26,6 +26,7 @@ fn main() {
 		provider: ProviderConfig { base_url: base.clone(), api_key: std::env::var("TAKEOFF_API_KEY").ok(), model: model.clone(), context_tokens: 32768, vision: true },
 		workspace: None,
 		others: vec![],
+		attachments: vec![],
 	};
 	let t0 = Instant::now();
 	let turn = start_turn(session.clone(), ctx, prompt.clone());

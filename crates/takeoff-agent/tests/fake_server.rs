@@ -116,6 +116,7 @@ fn view_then_mark_then_finish() {
 		provider: ProviderConfig { base_url: format!("http://127.0.0.1:{port}/v1"), api_key: Some("k".into()), model: "test-model".into(), context_tokens: 32_768, vision: true },
 		workspace: None,
 		others: vec![],
+		attachments: vec![],
 	};
 	let turn = start_turn(session.clone(), ctx, "Mark the middle square".into());
 	let mut events = Vec::new();
