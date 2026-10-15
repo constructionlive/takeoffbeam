@@ -435,3 +435,48 @@ fn ai_prompt_grows_with_its_text() {
 	assert!(after.height() > before.height() * 2.0, "grew: {before:?} → {after:?}");
 	assert!(after.bottom() < 900.0 - 30.0, "still above the status bar: {after:?}");
 }
+
+/// The menu bar opens its menus, with and without a drawing open.
+#[test]
+fn menu_bar_opens() {
+	let mut h = harness();
+	pump(&mut h, 5);
+	let file = h.get_by_label("File").rect().center();
+	click(&mut h, file);
+	assert!(h.query_by_label_contains("Open recent").is_some(), "File menu opens with no drawing");
+	h.key_press(egui::Key::Escape);
+	pump(&mut h, 5);
+
+	let pdf = std::path::PathBuf::from("/Users/office/Downloads/27-10 DRAWING_A.pdf");
+	if !pdf.exists() {
+		return;
+	}
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-menu-{}", std::process::id()));
+	std::fs::create_dir_all(&dir).unwrap();
+	let copy = dir.join("plan.pdf");
+	std::fs::copy(&pdf, &copy).unwrap();
+	let ctx = h.ctx.clone();
+	app(&mut h).open(copy, &ctx);
+	let t = Instant::now();
+	while !app(&mut h).debug_doc().is_some_and(|d| d.loaded) && t.elapsed() < Duration::from_secs(20) {
+		h.step();
+		std::thread::sleep(Duration::from_millis(20));
+	}
+	for tab in [0, 1, 2] {
+		app(&mut h).debug_right_tab(tab);
+		pump(&mut h, 5);
+		for menu in ["File", "Edit", "View"] {
+			let r = h.get_by_label(menu).rect().center();
+			click(&mut h, r);
+			let item = match menu {
+				"File" => "Open recent",
+				"Edit" => "Undo",
+				_ => "Fit width",
+			};
+			let open = h.query_by_label_contains(item).is_some();
+			assert!(open, "{menu} menu opens with the right panel on tab {tab}");
+			h.key_press(egui::Key::Escape);
+			pump(&mut h, 5);
+		}
+	}
+}

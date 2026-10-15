@@ -192,7 +192,11 @@ impl TakeoffApp {
 
 	fn top_bar(&mut self, ui: &mut egui::Ui, p: &Palette) {
 		let ctx = ui.ctx().clone();
+		let inset = ctx.input(|i| fullscreen_top_inset(i.viewport()));
 		egui::Panel::top("menu").frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(8, 4)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
+			if inset > 0.0 {
+				ui.add_space(inset);
+			}
 			ui.horizontal(|ui| {
 				// Brand mark.
 				let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), egui::Sense::hover());
@@ -1694,9 +1698,40 @@ pub fn parse_length(s: &str, default_unit: &str) -> Option<(f64, String)> {
 	Some((v, unit))
 }
 
+/// In macOS full screen on a display without a notch, the top of the window is
+/// where the system menu bar slides down: clicks there open it instead of our
+/// File / Edit row. Move the row below it. (On a notched display macOS already
+/// places full-screen windows below the menu bar, so the window is shorter than
+/// the screen and nothing is needed.)
+pub fn fullscreen_top_inset(v: &egui::ViewportInfo) -> f32 {
+	const MENU_STRIP: f32 = 26.0;
+	if !cfg!(target_os = "macos") || v.fullscreen != Some(true) {
+		return 0.0;
+	}
+	match (v.inner_rect, v.monitor_size) {
+		(Some(r), Some(m)) if r.height() + 1.0 >= m.y => MENU_STRIP,
+		_ => 0.0,
+	}
+}
+
 #[cfg(test)]
 mod tests {
-	use super::parse_length;
+	use super::{fullscreen_top_inset, parse_length};
+
+	#[test]
+	fn full_screen_inset_only_when_the_window_covers_the_menu_strip() {
+		let info = |fullscreen, h: f32| eframe::egui::ViewportInfo {
+			fullscreen: Some(fullscreen),
+			inner_rect: Some(eframe::egui::Rect::from_min_size(eframe::egui::Pos2::ZERO, eframe::egui::vec2(1920.0, h))),
+			monitor_size: Some(eframe::egui::vec2(1920.0, 1080.0)),
+			..Default::default()
+		};
+		let want = if cfg!(target_os = "macos") { 26.0 } else { 0.0 };
+		assert_eq!(fullscreen_top_inset(&info(true, 1080.0)), want, "external display, full screen");
+		assert_eq!(fullscreen_top_inset(&info(true, 1048.0)), 0.0, "notched display: already below the menu bar");
+		assert_eq!(fullscreen_top_inset(&info(false, 1080.0)), 0.0, "not full screen");
+		assert_eq!(fullscreen_top_inset(&eframe::egui::ViewportInfo::default()), 0.0, "unknown");
+	}
 
 	#[test]
 	fn lengths() {
