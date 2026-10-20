@@ -27,6 +27,7 @@ reqwest.workspace = true
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "persistence", "x11", "wayland"] }
 egui_extras = { version = "0.35", default-features = false }
 rfd = "0.15"
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 earcutr = "0.4"
 open = "5"
 

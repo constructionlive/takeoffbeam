@@ -39,6 +39,7 @@ fn live_turn(ch: &Channel) -> ChannelTurn {
 		workspace: std::env::var_os("TAKEOFF_LIVE_WORKSPACE").map(std::path::PathBuf::from),
 		others: vec![],
 		attachments: vec![],
+		images: vec![],
 		sweeps: None,
 		current_page: 1,
 		visible_region: None,
@@ -167,6 +168,7 @@ fn looks_at_the_attached_view_first() {
 	let turn = ChannelTurn {
 		exe: channel::find_exe(ch).expect("CLI installed"),
 		attachments: vec![takeoff_agent::ViewAttachment { drawing: pdf.clone(), page: 1, region }],
+		images: vec![],
 		..live_turn(&ch)
 	};
 	let h = channel::start_turn(&host, Arc::new(Mutex::new(ChatSession::new())), turn, "How many black squares are in the area I attached? Answer with the number only.".into());

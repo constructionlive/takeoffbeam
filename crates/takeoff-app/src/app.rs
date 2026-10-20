@@ -144,10 +144,17 @@ impl TakeoffApp {
 
 		// Dropped files.
 		let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+		let mut images = Vec::new();
 		for f in dropped {
 			if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
 				self.open(f, &ctx);
+			} else if crate::ai_panel::is_image_file(&f) {
+				images.push(f);
 			}
+		}
+		// Pictures go into the AI chat's next message.
+		if !images.is_empty() {
+			self.ai.attach_image_files(&images);
 		}
 
 		for d in &mut self.docs {
@@ -1628,6 +1635,11 @@ impl TakeoffApp {
 	#[doc(hidden)]
 	pub fn debug_open_models(&mut self, tab: usize) {
 		self.ai.debug_open(tab);
+	}
+
+	#[doc(hidden)]
+	pub fn debug_attach_images(&mut self, paths: &[PathBuf]) {
+		self.ai.attach_image_files(paths);
 	}
 
 	pub fn on_exit(&mut self) {

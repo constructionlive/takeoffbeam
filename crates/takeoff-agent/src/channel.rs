@@ -860,6 +860,8 @@ pub struct ChannelTurn {
 	pub others: Vec<tools::OtherDrawing>,
 	/// Areas attached to this message.
 	pub attachments: Vec<crate::ViewAttachment>,
+	/// Pictures the estimator added; the CLI opens them by path.
+	pub images: Vec<crate::UserImage>,
 	/// Model for detect / calibrate / trace, which make their own vision
 	/// calls; None leaves them out of the tool list.
 	pub sweeps: Option<ProviderConfig>,
@@ -974,8 +976,8 @@ fn run_turn(shared: &Arc<Shared>, addr: SocketAddr, session: &Arc<Mutex<ChatSess
 		}
 	};
 	let _ = std::fs::create_dir_all(turn.cwd());
-	let ctx_line = ctx_line + &crate::session::attachments_note(&turn.attachments, &shared.pdf);
-	session.lock().messages.push(Msg::User { text: user_text.clone(), context: Some(ctx_line.clone()), attachments: turn.attachments.clone() });
+	let ctx_line = ctx_line + &crate::session::attachments_note(&turn.attachments, &shared.pdf) + &crate::session::images_note(&turn.images, true, true);
+	session.lock().messages.push(Msg::User { text: user_text.clone(), context: Some(ctx_line.clone()), attachments: turn.attachments.clone(), images: turn.images.clone() });
 	let pending = Arc::new(Mutex::new(String::new()));
 	let dialect_model = match (turn.model.as_str(), turn.channel) {
 		("", Channel::ClaudeCode) => "claude".to_string(),
@@ -1064,10 +1066,20 @@ fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option
 				// Shell and file tools in the workspace (the working directory), pre-approved with the drawing tools.
 				c.args(["--tools", CLAUDE_WORKSPACE_TOOLS]);
 				c.args(["--allowedTools", &format!("mcp__{SERVER},{CLAUDE_WORKSPACE_TOOLS}")]);
+			} else if !turn.images.is_empty() {
+				// The drawing tools plus Read, so it can open the attached pictures.
+				c.args(["--tools", "Read"]);
+				c.args(["--allowedTools", &format!("mcp__{SERVER},Read")]);
 			} else {
 				// No built-in tools (shell, files, web): only the drawing tools, pre-approved.
 				c.args(["--tools", ""]);
 				c.args(["--allowedTools", &format!("mcp__{SERVER}")]);
+			}
+			// The folders holding the attached pictures, so Read may open them.
+			let mut dirs: Vec<&Path> = turn.images.iter().filter_map(|im| im.path.parent()).collect();
+			dirs.dedup();
+			for d in dirs {
+				c.arg("--add-dir").arg(d);
 			}
 			c.args(["--permission-mode", "dontAsk"]);
 			if !turn.model.is_empty() {
@@ -1627,9 +1639,9 @@ mod tests {
 	#[test]
 	fn preamble_carries_earlier_turns_but_not_the_new_message() {
 		let mut s = ChatSession::new();
-		s.messages.push(Msg::User { text: "Count outlets".into(), context: None, attachments: vec![] });
+		s.messages.push(Msg::User { text: "Count outlets".into(), context: None, attachments: vec![], images: vec![] });
 		s.messages.push(Msg::Assistant { text: "Found 4.".into(), reasoning: String::new(), tool_calls: vec![] });
-		s.messages.push(Msg::User { text: "Now switches".into(), context: None, attachments: vec![] });
+		s.messages.push(Msg::User { text: "Now switches".into(), context: None, attachments: vec![], images: vec![] });
 		let p = history_preamble(&s);
 		assert!(p.contains("Estimator: Count outlets") && p.contains("Bench: Found 4."));
 		assert!(!p.contains("Now switches"));

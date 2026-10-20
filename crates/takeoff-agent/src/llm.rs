@@ -256,10 +256,11 @@ pub fn models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, Stri
 		.collect())
 }
 
-/// An image part for a user message.
-pub fn image_part(png: &[u8], model: &str) -> Value {
+/// An image part for a user message (PNG, or JPEG for photos).
+pub fn image_part(bytes: &[u8], model: &str) -> Value {
 	use base64::Engine;
-	let url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png));
+	let mime = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { "image/jpeg" } else { "image/png" };
+	let url = format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes));
 	let mut iu = json!({ "url": url });
 	if takeoff_core::coords::wants_original_detail(model) {
 		iu["detail"] = json!("original");

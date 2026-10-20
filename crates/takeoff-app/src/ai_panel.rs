@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText, ScrollArea, TextureHandle};
 use parking_lot::Mutex;
 use takeoff_agent::channel::{self, Channel, ChannelModel, ChannelStatus, ToolHost};
-use takeoff_agent::{AgentContext, AgentEvent, ChatSession, ProviderConfig, Role, TurnHandle, ViewAttachment};
+use takeoff_agent::{AgentContext, AgentEvent, ChatSession, ProviderConfig, Role, TurnHandle, UserImage, ViewAttachment};
 use takeoff_models::catalog;
 use takeoff_models::download::{DownloadHandle, DownloadState};
 use takeoff_models::fit::{CacheType, FitReport, Verdict};
@@ -46,6 +46,7 @@ struct Live {
 	/// The message being answered.
 	asked: String,
 	asked_attachments: Vec<ViewAttachment>,
+	asked_images: Vec<UserImage>,
 }
 
 /// What we know about one subscription CLI (filled in by background threads).
@@ -77,6 +78,18 @@ fn channel_workdir() -> PathBuf {
 	config_dir().join("bench")
 }
 
+/// One background read of the account's cloud models and details.
+struct CloudFetch {
+	models: Result<Vec<takeoff_cloud::CloudModel>, String>,
+	me: Option<takeoff_cloud::Me>,
+}
+
+/// How often the cloud model list is re-read on its own (access granted or
+/// revoked on construction.live shows up without a restart).
+const CLOUD_REFRESH_EVERY: Duration = Duration::from_secs(300);
+/// Opening the model picker re-reads the list if it is older than this.
+const CLOUD_REFRESH_ON_OPEN: Duration = Duration::from_secs(20);
+
 enum CloudFlow {
 	Idle,
 	Waiting { code: takeoff_cloud::DeviceCode, started: Instant, last_poll: Instant },
@@ -88,6 +101,15 @@ pub struct AiPanel {
 	pub others: Vec<takeoff_agent::tools::OtherDrawing>,
 	/// Views attached to the message being written.
 	attached: Vec<ViewAttachment>,
+	/// Pictures added to the message being written (file, drop or paste).
+	attached_images: Vec<UserImage>,
+	/// Why the last picture could not be added.
+	image_error: Option<String>,
+	/// A V key press reached us since the last release (so a release without
+	/// one was Cmd/Ctrl+V, which egui swallows).
+	v_pressed_seen: bool,
+	/// When egui last pasted text (then Cmd+V was a text paste, not a picture).
+	last_text_paste: Option<Instant>,
 	/// Where the AI just looked, for the app to follow: (drawing, page, region).
 	pub follow_request: Option<(PathBuf, u32, (f64, f64, f64, f64))>,
 	/// Last automatic subscription re-check (while waiting on Install / Sign in).
@@ -112,6 +134,10 @@ pub struct AiPanel {
 	cloud_me: Option<takeoff_cloud::Me>,
 	cloud_flow: CloudFlow,
 	cloud_error: Option<String>,
+	/// The model list being re-read in the background.
+	cloud_fetch: Option<Arc<Mutex<Option<CloudFetch>>>>,
+	/// When the list was last asked for.
+	cloud_fetched: Option<Instant>,
 	pub models_open: bool,
 	models_tab: usize,
 	probe: Option<Result<Vec<String>, String>>,
@@ -128,6 +154,10 @@ impl AiPanel {
 		let mut s = Self {
 			others: Vec::new(),
 			attached: Vec::new(),
+			attached_images: Vec::new(),
+			image_error: None,
+			v_pressed_seen: false,
+			last_text_paste: None,
 			follow_request: None,
 			last_channel_poll: None,
 			composer_h: 118.0,
@@ -148,6 +178,8 @@ impl AiPanel {
 			cloud_me: None,
 			cloud_flow: CloudFlow::Idle,
 			cloud_error: None,
+			cloud_fetch: None,
+			cloud_fetched: None,
 			models_open: false,
 			models_tab: 0,
 			probe: None,
@@ -156,7 +188,7 @@ impl AiPanel {
 			hosts: HashMap::new(),
 			channels: Channel::ALL.into_iter().map(|c| (c, Arc::default())).collect(),
 		};
-		s.refresh_cloud_async();
+		s.refresh_cloud(takeoff_cloud::CloudConfig::default());
 		s
 	}
 
@@ -168,21 +200,70 @@ impl AiPanel {
 		}
 	}
 
-	fn refresh_cloud_async(&mut self) {
-		// Cheap enough to do inline on open; the UI shows the cached list meanwhile.
-		if let Some((token, _)) = self.cloud.clone() {
-			let token = &token;
-			let cfg = takeoff_cloud::CloudConfig::default();
-			match takeoff_cloud::models(&cfg, token) {
-				Ok(m) => self.cloud_models = m.into_iter().filter(|m| m.vision).collect(),
-				Err(e) if takeoff_cloud::is_unauthorized(&e) => {
-					takeoff_cloud::token::clear();
-					self.cloud = None;
-				}
-				Err(e) => self.cloud_error = Some(e),
-			}
-			self.cloud_me = takeoff_cloud::me(&cfg, token).ok();
+	/// Re-read the account's models and details on a background thread; the
+	/// UI keeps showing the last list meanwhile. Picked up in [`Self::poll`].
+	fn refresh_cloud(&mut self, cfg: takeoff_cloud::CloudConfig) {
+		if self.cloud_fetch.is_some() {
+			return;
 		}
+		let Some((token, _)) = self.cloud.clone() else { return };
+		let slot: Arc<Mutex<Option<CloudFetch>>> = Arc::default();
+		let out = slot.clone();
+		let spawned = std::thread::Builder::new().name("cloud-models".into()).spawn(move || {
+			let models = takeoff_cloud::models(&cfg, &token);
+			let me = if models.as_ref().is_err_and(|e| takeoff_cloud::is_unauthorized(e)) { None } else { takeoff_cloud::me(&cfg, &token).ok() };
+			*out.lock() = Some(CloudFetch { models, me });
+		});
+		if spawned.is_ok() {
+			self.cloud_fetch = Some(slot);
+			self.cloud_fetched = Some(Instant::now());
+		}
+	}
+
+	/// Refresh unless a read is running or the list is fresher than `max_age`.
+	fn refresh_cloud_if_older(&mut self, settings: &Settings, max_age: Duration) {
+		if self.cloud.is_some() && self.cloud_fetched.is_none_or(|t| t.elapsed() >= max_age) {
+			self.refresh_cloud(Self::cloud_cfg(settings));
+		}
+	}
+
+	fn cloud_refreshing(&self) -> bool {
+		self.cloud_fetch.is_some()
+	}
+
+	/// Take a finished background read.
+	fn poll_cloud_fetch(&mut self, ctx: &egui::Context) {
+		let Some(slot) = &self.cloud_fetch else { return };
+		let Some(done) = slot.lock().take() else {
+			ctx.request_repaint_after(Duration::from_millis(200));
+			return;
+		};
+		self.cloud_fetch = None;
+		match done.models {
+			Ok(mut m) => {
+				// Models that can see the drawing first; the rest are text only.
+				m.sort_by_key(|x| !x.vision);
+				self.cloud_models = m;
+				self.cloud_error = None;
+			}
+			Err(e) if takeoff_cloud::is_unauthorized(&e) => {
+				takeoff_cloud::token::clear();
+				self.cloud = None;
+				self.cloud_models.clear();
+				self.cloud_me = None;
+				self.cloud_error = Some("Your construction.live sign-in has ended. Sign in again.".into());
+			}
+			Err(e) => self.cloud_error = Some(e),
+		}
+		if done.me.is_some() {
+			self.cloud_me = done.me;
+		}
+		ctx.request_repaint();
+	}
+
+	/// Whether a cloud model can see images (unknown ids are assumed to).
+	fn cloud_vision(&self, id: &str) -> bool {
+		self.cloud_models.iter().find(|x| x.id == id).is_none_or(|x| x.vision)
 	}
 
 	fn session(&mut self, path: &PathBuf) -> Arc<Mutex<ChatSession>> {
@@ -271,7 +352,8 @@ impl AiPanel {
 		} else if let Some(id) = m.strip_prefix("cloud:") {
 			let label = self.cloud_models.iter().find(|x| x.id == id).map(|x| x.name.clone()).unwrap_or_else(|| id.to_string());
 			let ok = self.cloud.is_some();
-			(label, if ok { Color32::from_rgb(0x4C, 0xC2, 0xFF) } else { Color32::from_gray(140) }, if ok { "cloud" } else { "signed out" })
+			let state = if !ok { "signed out" } else if self.cloud_vision(id) { "cloud" } else { "cloud · text only" };
+			(label, if ok { Color32::from_rgb(0x4C, 0xC2, 0xFF) } else { Color32::from_gray(140) }, state)
 		} else if let Some((ch, model)) = channel_model(m) {
 			// "opencode/deepseek-v4.1-flash-free" reads as "deepseek-v4.1-flash-free".
 			let shown = model.strip_prefix("opencode/").unwrap_or(model);
@@ -297,8 +379,8 @@ impl AiPanel {
 			return;
 		}
 		if self.cloud.is_some() {
-			let default = self.cloud_me.as_ref().and_then(|m| m.default_model.clone()).filter(|id| self.cloud_models.iter().any(|c| &c.id == id));
-			if let Some(id) = default.or_else(|| self.cloud_models.first().map(|m| m.id.clone())) {
+			let default = self.cloud_me.as_ref().and_then(|m| m.default_model.clone()).filter(|id| self.cloud_models.iter().any(|c| &c.id == id && c.vision));
+			if let Some(id) = default.or_else(|| self.cloud_models.iter().find(|m| m.vision).or(self.cloud_models.first()).map(|m| m.id.clone())) {
 				settings.model = format!("cloud:{id}");
 				settings.save();
 				return;
@@ -336,7 +418,8 @@ impl AiPanel {
 		if let Some(id) = m.strip_prefix("cloud:") {
 			let (token, _) = self.cloud.clone().ok_or("Sign in to construction.live to use cloud models")?;
 			let ctx = self.cloud_models.iter().find(|x| x.id == id).map(|x| x.context_tokens).unwrap_or(128_000);
-			return Ok(ProviderConfig { base_url: takeoff_cloud::chat_base_url(&Self::cloud_cfg(settings)), api_key: Some(token), model: id.to_string(), context_tokens: ctx, vision: true });
+			let vision = self.cloud_vision(id);
+			return Ok(ProviderConfig { base_url: takeoff_cloud::chat_base_url(&Self::cloud_cfg(settings)), api_key: Some(token), model: id.to_string(), context_tokens: ctx, vision });
 		}
 		if m == "custom" {
 			if settings.custom_base_url.trim().is_empty() || settings.custom_model.trim().is_empty() {
@@ -409,9 +492,10 @@ impl AiPanel {
 					workspace: settings.workspace(),
 					others: self.others.iter().filter(|o| o.path != doc.path).cloned().collect(),
 					attachments: self.attached.clone(),
+					images: self.attached_images.clone(),
 				};
 				let transcript_len = session.lock().transcript().len();
-				self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), asked_attachments: std::mem::take(&mut self.attached), ..Default::default() };
+				self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), asked_attachments: std::mem::take(&mut self.attached), asked_images: std::mem::take(&mut self.attached_images), ..Default::default() };
 				self.turn = Some(takeoff_agent::start_turn(session, ctx, text));
 				self.turn_doc = Some(doc.path.clone());
 				self.queued = None;
@@ -442,13 +526,14 @@ impl AiPanel {
 			workspace: settings.workspace(),
 			others: self.others.iter().filter(|o| o.path != doc.path).cloned().collect(),
 			attachments: self.attached.clone(),
+			images: self.attached_images.clone(),
 			sweeps,
 			current_page: doc.page,
 			visible_region: visible_region(doc),
 			selected_ids: doc.selection.iter().cloned().collect(),
 		};
 		let transcript_len = session.lock().transcript().len();
-		self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), asked_attachments: std::mem::take(&mut self.attached), ..Default::default() };
+		self.live = Live { started: Some(Instant::now()), transcript_len, asked: text.clone(), asked_attachments: std::mem::take(&mut self.attached), asked_images: std::mem::take(&mut self.attached_images), ..Default::default() };
 		self.turn = Some(channel::start_turn(&self.hosts[&doc.path], session, turn, text));
 		self.turn_doc = Some(doc.path.clone());
 		self.queued = None;
@@ -461,7 +546,8 @@ impl AiPanel {
 	fn sweep_provider(&self, settings: &Settings) -> Option<ProviderConfig> {
 		if let Some((token, _)) = &self.cloud {
 			let default = self.cloud_me.as_ref().and_then(|m| m.default_model.clone());
-			let m = self.cloud_models.iter().find(|c| Some(&c.id) == default.as_ref()).or_else(|| self.cloud_models.first())?;
+			// Sweeps look at tiles, so only a model that can see will do.
+			let m = self.cloud_models.iter().filter(|c| c.vision).find(|c| Some(&c.id) == default.as_ref()).or_else(|| self.cloud_models.iter().find(|c| c.vision))?;
 			return Some(ProviderConfig { base_url: takeoff_cloud::chat_base_url(&Self::cloud_cfg(settings)), api_key: Some(token.clone()), model: m.id.clone(), context_tokens: m.context_tokens, vision: true });
 		}
 		let s = self.server.as_ref().filter(|_| self.server_state == ServerState::Ready)?;
@@ -472,6 +558,8 @@ impl AiPanel {
 	/// Drain agent events; returns true while a turn is running.
 	pub fn poll(&mut self, ctx: &egui::Context, canvas: &mut Canvas, doc: Option<&mut OpenDoc>, settings: &Settings) {
 		self.poll_server(ctx);
+		self.poll_cloud_fetch(ctx);
+		self.refresh_cloud_if_older(settings, CLOUD_REFRESH_EVERY);
 		for d in &self.downloads {
 			if matches!(d.progress().state, DownloadState::Running) {
 				ctx.request_repaint_after(Duration::from_millis(250));
@@ -492,7 +580,8 @@ impl AiPanel {
 						let _ = takeoff_cloud::token::save(&token, &account);
 						self.cloud = Some((token, account));
 						self.cloud_flow = CloudFlow::Idle;
-						self.refresh_cloud_async();
+						self.cloud_error = None;
+						self.refresh_cloud(Self::cloud_cfg(settings));
 					}
 					Ok(takeoff_cloud::PollResult::Denied) => self.cloud_flow = CloudFlow::Failed("Sign-in was denied.".into()),
 					Ok(takeoff_cloud::PollResult::Expired) => self.cloud_flow = CloudFlow::Failed("The sign-in code expired. Try again.".into()),
@@ -588,9 +677,67 @@ impl AiPanel {
 		self.queued = None;
 	}
 
+	// ── Pictures in the message ─────────────────────────────────────────
+
+	/// Add image files (picked, or dropped on the window) to the message being written.
+	pub fn attach_image_files(&mut self, paths: &[PathBuf]) {
+		for path in paths {
+			let name = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+			match image::open(path) {
+				Ok(img) => self.attach_image(img, &name),
+				Err(e) => self.image_error = Some(format!("Couldn't add {name}: only PNG and JPEG pictures work ({e})")),
+			}
+		}
+	}
+
+	fn attach_image(&mut self, img: image::DynamicImage, name: &str) {
+		if self.attached_images.len() >= MAX_IMAGES_PER_MESSAGE {
+			self.image_error = Some(format!("At most {MAX_IMAGES_PER_MESSAGE} pictures per message."));
+			return;
+		}
+		match store_chat_image(img, name) {
+			Ok(u) => {
+				self.attached_images.push(u);
+				self.image_error = None;
+			}
+			Err(e) => self.image_error = Some(format!("Couldn't add {name}: {e}")),
+		}
+	}
+
+	/// Add the picture on the clipboard, if there is one.
+	fn paste_image(&mut self) {
+		let Ok(mut cb) = arboard::Clipboard::new() else { return };
+		let Ok(data) = cb.get_image() else { return };
+		let Some(rgba) = image::RgbaImage::from_raw(data.width as u32, data.height as u32, data.bytes.into_owned()) else { return };
+		self.attach_image(image::DynamicImage::ImageRgba8(rgba), "Pasted image");
+	}
+
+	/// Whether Cmd/Ctrl+V was pressed this frame. egui turns it into a text
+	/// paste and drops the key press, and with only a picture on the
+	/// clipboard there is no paste either; the key release still arrives.
+	fn saw_paste_shortcut(&mut self, ui: &egui::Ui) -> bool {
+		let mut cmd_v = false;
+		ui.input(|i| {
+			for e in &i.events {
+				match e {
+					egui::Event::Paste(_) => self.last_text_paste = Some(Instant::now()),
+					egui::Event::Key { key: egui::Key::V, pressed: true, .. } => self.v_pressed_seen = true,
+					egui::Event::Key { key: egui::Key::V, pressed: false, .. } => {
+						cmd_v |= !self.v_pressed_seen;
+						self.v_pressed_seen = false;
+					}
+					_ => {}
+				}
+			}
+		});
+		cmd_v
+	}
+
 	// ── Panel ───────────────────────────────────────────────────────────
 
 	pub fn ui(&mut self, ui: &mut egui::Ui, doc: Option<&mut OpenDoc>, canvas: &mut Canvas, settings: &mut Settings, p: &Palette) {
+		let panel_hovered = ui.ui_contains_pointer();
+		let cmd_v = self.saw_paste_shortcut(ui);
 		// Model picker: a full-width pill (provider badge · model · status · chevron).
 		let (label, dot, state) = self.model_label(settings);
 		let (badge, glyph) = provider_badge(&settings.model);
@@ -698,6 +845,7 @@ impl AiPanel {
 					Role::User => {
 						flush(ui, &mut tool_run, &mut self.thumbs);
 						user_bubble(ui, p, &e.text);
+						image_strip(ui, p, &e.images, &mut self.thumbs, false);
 						attachment_chips(ui, p, &e.attachments, &doc.path, &mut jump);
 					}
 					Role::Assistant => {
@@ -719,6 +867,7 @@ impl AiPanel {
 			if self.turn.is_some() {
 				if !self.live.asked.is_empty() {
 					user_bubble(ui, p, &self.live.asked);
+					image_strip(ui, p, &self.live.asked_images, &mut self.thumbs, false);
 					attachment_chips(ui, p, &self.live.asked_attachments, &doc.path, &mut jump);
 				}
 				// Finished steps fold away like they do once the turn is over; the
@@ -792,7 +941,35 @@ impl AiPanel {
 					self.attached.push(a);
 				}
 			}
+			if ui
+				.small_button(format!("{} Add image", i::IMAGE))
+				.on_hover_text(format!("Add photos or screenshots to your message. You can also drop image files on the window, or copy a picture and press {} in the message box.", if cfg!(target_os = "macos") { "Cmd+V" } else { "Ctrl+V" }))
+				.clicked()
+			{
+				if let Some(files) = rfd::FileDialog::new().add_filter("Images", IMAGE_EXTS).set_title("Add images to your message").pick_files() {
+					self.attach_image_files(&files);
+				}
+			}
 		});
+		// Cmd/Ctrl+V with a picture on the clipboard (text pastes go to the box as usual).
+		let composer_focused = ui.memory(|m| m.has_focus(egui::Id::new("ai-input")));
+		let text_just_pasted = self.last_text_paste.is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
+		if cmd_v && (composer_focused || panel_hovered) && !text_just_pasted {
+			self.paste_image();
+		}
+		if !self.attached_images.is_empty() {
+			if let Some(k) = image_strip(ui, p, &self.attached_images, &mut self.thumbs, true) {
+				self.attached_images.remove(k);
+			}
+		}
+		if let Some(e) = self.image_error.clone() {
+			ui.horizontal_wrapped(|ui| {
+				ui.label(RichText::new(format!("{}  {e}", i::CIRCLE_ALERT)).size(11.5).color(p.danger));
+				if ui.small_button(i::X).on_hover_text("Dismiss").clicked() {
+					self.image_error = None;
+				}
+			});
+		}
 		if !self.attached.is_empty() {
 			let mut remove = None;
 			ui.horizontal_wrapped(|ui| {
@@ -836,10 +1013,13 @@ impl AiPanel {
 							self.stop();
 						}
 					} else {
-						let can = !self.input.trim().is_empty();
+						let can = !self.input.trim().is_empty() || !self.attached_images.is_empty();
 						let b = ui.add_enabled(can, egui::Button::new(RichText::new(format!("{}  Send", i::SEND)).color(p.on_accent).font(theme::semibold(12.5))).fill(p.accent_fill).corner_radius(4));
 						if (b.clicked() || enter) && can {
-							let text = std::mem::take(&mut self.input).trim().to_string();
+							let mut text = std::mem::take(&mut self.input).trim().to_string();
+							if text.is_empty() {
+								text = if self.attached_images.len() == 1 { "Have a look at the attached image." } else { "Have a look at the attached images." }.to_string();
+							}
 							self.auto_pick_model(settings);
 							if settings.model.is_empty() {
 								self.input = text;
@@ -901,13 +1081,30 @@ impl AiPanel {
 		}
 
 		ui.add_space(4.0);
-		group_header(ui, p, i::CLOUD, "construction.live", "uses your credits");
+		// Access granted on construction.live shows up as soon as the picker opens.
+		self.refresh_cloud_if_older(settings, CLOUD_REFRESH_ON_OPEN);
+		let refresh = self.cloud.is_some() && self.cloud_refreshing();
+		if cloud_header(ui, p, refresh, self.cloud.is_some()) {
+			self.refresh_cloud(Self::cloud_cfg(settings));
+		}
 		if self.cloud.is_some() && !self.cloud_models.is_empty() {
 			for m in self.cloud_models.clone() {
 				let id = format!("cloud:{}", m.id);
-				if model_row(ui, p, (p.accent_fill, i::CLOUD), &m.name, &format!("{}K context · sees drawings", m.context_tokens / 1000), settings.model == id, true).clicked() {
+				let sub = format!("{}K context · {}", m.context_tokens / 1000, if m.vision { "sees drawings" } else { "text only: can't see drawings" });
+				if model_row(ui, p, (p.accent_fill, i::CLOUD), &m.name, &sub, settings.model == id, true).clicked() {
 					chosen = Some(id);
 				}
+			}
+		} else if self.cloud.is_some() && (refresh || self.cloud_fetched.is_none()) {
+			ui.horizontal(|ui| {
+				ui.add_space(10.0);
+				ui.spinner();
+				widgets::hint(ui, p, "Loading your models…");
+			});
+		} else if self.cloud.is_some() {
+			let sub = self.cloud_error.clone().map(|e| short(&e, 70)).unwrap_or_else(|| "Ask your admin to give you access, then refresh".into());
+			if action_row(ui, p, i::REFRESH_CW, "No models on this account yet", &sub).clicked() {
+				self.refresh_cloud(Self::cloud_cfg(settings));
 			}
 		} else if action_row(ui, p, i::LOG_IN, "Sign in to construction.live", "Gemini, Claude, GPT and more on your account").clicked() {
 			setup = Some(2);
@@ -1234,6 +1431,8 @@ impl AiPanel {
 						CloudFlow::Idle | CloudFlow::Failed(_) => {
 							if let CloudFlow::Failed(e) = &self.cloud_flow {
 								ui.label(RichText::new(e).color(p.danger));
+							} else if let Some(e) = &self.cloud_error {
+								ui.label(RichText::new(e).color(p.danger));
 							}
 							if widgets::primary_button(ui, p, &format!("{}  Sign in with construction.live", i::LOG_IN)).clicked() {
 								let name = format!("Takeoff Desk on {}", hostname());
@@ -1278,6 +1477,9 @@ impl AiPanel {
 								takeoff_cloud::token::clear();
 								self.cloud = None;
 								self.cloud_models.clear();
+								self.cloud_me = None;
+								self.cloud_fetch = None;
+								self.cloud_fetched = None;
 								if settings.model.starts_with("cloud:") {
 									settings.model.clear();
 								}
@@ -1291,18 +1493,27 @@ impl AiPanel {
 					}
 				});
 				ui.add_space(6.0);
-				if self.cloud_models.is_empty() {
-					if ui.button(format!("{}  Load models", i::REFRESH_CW)).clicked() {
-						self.refresh_cloud_async();
-					}
-					if let Some(e) = &self.cloud_error {
-						ui.label(RichText::new(e).color(p.danger));
-					}
+				self.refresh_cloud_if_older(settings, CLOUD_REFRESH_ON_OPEN);
+				ui.horizontal(|ui| {
+					widgets::section_label(ui, p, "Models on your account");
+					ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+						if self.cloud_refreshing() {
+							ui.spinner();
+						} else if ui.button(format!("{}  Refresh", i::REFRESH_CW)).on_hover_text("Check construction.live for models you were just given access to").clicked() {
+							self.refresh_cloud(Self::cloud_cfg(settings));
+						}
+					});
+				});
+				if let Some(e) = &self.cloud_error {
+					ui.label(RichText::new(e).color(p.danger));
+				}
+				if self.cloud_models.is_empty() && !self.cloud_refreshing() {
+					widgets::hint(ui, p, "No models are enabled for this account yet. Once an admin gives you access on construction.live, press Refresh.");
 				}
 				for m in self.cloud_models.clone() {
 					ui.horizontal(|ui| {
 						ui.label(RichText::new(&m.name).font(theme::medium(13.0)));
-						ui.label(RichText::new(format!("{}K context", m.context_tokens / 1000)).size(11.5).color(p.text2));
+						ui.label(RichText::new(format!("{}K context · {}", m.context_tokens / 1000, if m.vision { "sees drawings" } else { "text only" })).size(11.5).color(p.text2));
 						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 							let id = format!("cloud:{}", m.id);
 							if settings.model == id {
@@ -1739,6 +1950,81 @@ fn attachment_chips(ui: &mut egui::Ui, p: &Palette, atts: &[ViewAttachment], her
 	});
 }
 
+/// Picture files the chat accepts (what the image crate decodes here).
+pub const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg"];
+const MAX_IMAGES_PER_MESSAGE: usize = 8;
+
+pub fn is_image_file(path: &std::path::Path) -> bool {
+	path.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// Shrink a picture to a size models take (2048 px on the long edge), encode
+/// it (PNG; JPEG when that is much smaller, as for photos) and keep it in the
+/// app's folder, where the saved chat points to it.
+fn store_chat_image(img: image::DynamicImage, name: &str) -> Result<UserImage, String> {
+	use std::sync::atomic::{AtomicU32, Ordering};
+	static N: AtomicU32 = AtomicU32::new(0);
+	const MAX_EDGE: u32 = 2048;
+	if img.width() == 0 || img.height() == 0 {
+		return Err("the picture is empty".into());
+	}
+	let img = if img.width().max(img.height()) > MAX_EDGE { img.resize(MAX_EDGE, MAX_EDGE, image::imageops::FilterType::Lanczos3) } else { img };
+	let mut png = Vec::new();
+	img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+	let (bytes, ext) = if png.len() > 1_500_000 {
+		let mut jpg = Vec::new();
+		image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 88).encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+		if jpg.len() < png.len() { (jpg, "jpg") } else { (png, "png") }
+	} else {
+		(png, "png")
+	};
+	let dir = config_dir().join("chat-images");
+	std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+	let path = dir.join(format!("{}-{}.{ext}", takeoff_core::now_ms(), N.fetch_add(1, Ordering::Relaxed)));
+	std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+	Ok(UserImage { path, name: name.to_string() })
+}
+
+/// Thumbnails of a message's pictures; click one to open it. With
+/// `removable`, each has an x and the index of the one clicked is returned.
+fn image_strip(ui: &mut egui::Ui, p: &Palette, images: &[UserImage], thumbs: &mut HashMap<String, TextureHandle>, removable: bool) -> Option<usize> {
+	if images.is_empty() {
+		return None;
+	}
+	let mut remove = None;
+	let mut one = |ui: &mut egui::Ui, k: usize, im: &UserImage| {
+		let key = format!("user-img:{}", im.path.display());
+		let tex = thumbs.entry(key.clone()).or_insert_with(|| {
+			let img = image::open(&im.path).map(|i| i.thumbnail(240, 240).to_rgba8()).unwrap_or_else(|_| image::RgbaImage::from_pixel(48, 48, image::Rgba([120, 120, 120, 255])));
+			ui.ctx().load_texture(key, egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()), egui::TextureOptions::LINEAR)
+		});
+		let size = tex.size_vec2();
+		let h = 64.0;
+		let w = (size.x * h / size.y.max(1.0)).clamp(24.0, 180.0);
+		let r = ui.add(egui::Image::new((tex.id(), egui::vec2(w, h))).corner_radius(4).sense(egui::Sense::click()));
+		if r.on_hover_text(format!("{} (click to open)", im.name)).clicked() {
+			let _ = open::that(&im.path);
+		}
+		if removable && ui.add(egui::Button::new(RichText::new(i::X).color(p.text2)).small()).on_hover_text("Remove").clicked() {
+			remove = Some(k);
+		}
+	};
+	if removable {
+		ui.horizontal_wrapped(|ui| {
+			for (k, im) in images.iter().enumerate() {
+				one(ui, k, im);
+			}
+		});
+	} else {
+		ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+			for (k, im) in images.iter().enumerate().rev() {
+				one(ui, k, im);
+			}
+		});
+	}
+	remove
+}
+
 fn chip(ui: &mut egui::Ui, p: &Palette, text: &str) -> egui::Response {
 	egui::Frame::new()
 		.fill(p.hover)
@@ -1894,6 +2180,30 @@ fn group_header(ui: &mut egui::Ui, p: &Palette, icon: &str, title: &str, note: &
 			ui.label(RichText::new(note).size(11.0).color(p.muted));
 		});
 	});
+}
+
+/// The construction.live group header, with a refresh button when signed in.
+/// Returns true when refresh was clicked.
+fn cloud_header(ui: &mut egui::Ui, p: &Palette, refreshing: bool, signed_in: bool) -> bool {
+	let mut clicked = false;
+	ui.horizontal(|ui| {
+		ui.add_space(6.0);
+		ui.label(RichText::new(i::CLOUD).font(theme::icon_font(11.0)).color(p.muted));
+		ui.label(RichText::new("CONSTRUCTION.LIVE").font(theme::semibold(10.5)).color(p.muted).extra_letter_spacing(0.6));
+		ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+			ui.add_space(6.0);
+			if signed_in {
+				if refreshing {
+					ui.add(egui::Spinner::new().size(12.0));
+				} else {
+					let r = ui.add(egui::Button::new(RichText::new(i::REFRESH_CW).font(theme::icon_font(12.0)).color(p.muted)).frame(false));
+					clicked = r.on_hover_text("Refresh: check for models you were just given access to").clicked();
+				}
+			}
+			ui.label(RichText::new("uses your credits").size(11.0).color(p.muted));
+		});
+	});
+	clicked
 }
 
 /// One choice: badge, title, one-line description, check when selected.

@@ -27,6 +27,7 @@ fn main() {
 		workspace: None,
 		others: vec![],
 		attachments: vec![],
+		images: vec![],
 	};
 	let t0 = Instant::now();
 	let turn = start_turn(session.clone(), ctx, prompt.clone());

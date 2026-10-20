@@ -104,8 +104,8 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 	}
 	let hidden: HashSet<String> = ctx.doc.lock().data.hidden_layers.iter().cloned().collect();
 	let _ = tctx.drawing.set_hidden_layers(&hidden);
-	let ctx_line = ctx_line + &crate::session::attachments_note(&ctx.attachments, &ctx.pdf_path);
-	session.lock().messages.push(Msg::User { text: user_text, context: Some(ctx_line), attachments: ctx.attachments.clone() });
+	let ctx_line = ctx_line + &crate::session::attachments_note(&ctx.attachments, &ctx.pdf_path) + &crate::session::images_note(&ctx.images, provider.vision, false);
+	session.lock().messages.push(Msg::User { text: user_text, context: Some(ctx_line), attachments: ctx.attachments.clone(), images: ctx.images.clone() });
 	let tool_defs = openai_tools(tctx.workspace.is_some());
 	let mut steps = 0;
 	let mut failures_in_a_row = 0;

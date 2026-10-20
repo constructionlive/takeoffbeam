@@ -205,3 +205,28 @@ fn subscriptions_snapshot() {
 		save(&mut h, &format!("{tag}-model-menu"));
 	}
 }
+
+/// Pictures in the AI chat: one sent with an earlier message, one waiting in the composer.
+/// `SNAP_DIR=/tmp/snaps SNAP_PDF=plan.pdf SNAP_IMG=photo.png cargo test -p takeoff-app --test snapshots ai_images_snapshot -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn ai_images_snapshot() {
+	let pdf = std::env::var("SNAP_PDF").unwrap_or_else(|_| "/Users/office/Downloads/drawing.pdf".into());
+	let img = std::path::PathBuf::from(std::env::var("SNAP_IMG").expect("SNAP_IMG: a PNG or JPEG"));
+	let mut h = harness(ThemeChoice::Dark);
+	h.run_steps(4);
+	let ctx = h.ctx.clone();
+	h.state_mut().as_mut().unwrap().open(pdf.clone().into(), &ctx);
+	settle(&mut h, |a| a.debug_doc().is_some_and(|d| d.loaded && d.base.contains_key(&d.page)), Duration::from_secs(20));
+	let app = h.state_mut().as_mut().unwrap();
+	let path = app.debug_doc().unwrap().path.clone();
+	let session = app.debug_session(&path);
+	session.lock().clear();
+	session.lock().messages.push(takeoff_agent::session::Msg::User { text: "Is this the door hardware shown on the plan?".into(), context: None, attachments: vec![], images: vec![takeoff_agent::UserImage { path: img.clone(), name: "site photo.png".into() }] });
+	app.debug_attach_images(&[img]);
+	app.debug_left_tab(2);
+	app.debug_right_tab(2);
+	h.run_steps(4);
+	save(&mut h, "dark-ai-images");
+	h.state_mut().as_mut().unwrap().debug_session(&path).lock().clear();
+}

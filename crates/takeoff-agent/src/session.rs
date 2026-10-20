@@ -10,6 +10,40 @@ use serde_json::{json, Value};
 use crate::llm::{image_part, ToolCall};
 
 pub const MAX_LIVE_IMAGES: usize = 6;
+/// The estimator's own pictures (photos, screenshots) kept in context, newest first.
+pub const MAX_LIVE_USER_IMAGES: usize = 6;
+
+/// A picture the estimator added to a message (photo, screenshot, detail
+/// from another document). The file lives in the app's config folder; the
+/// chat stores only its path, so saved chats stay small.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UserImage {
+	pub path: std::path::PathBuf,
+	/// What the estimator called it (the original file name, or "Pasted image").
+	pub name: String,
+}
+
+/// The note sent with a message that carries pictures.
+pub fn images_note(images: &[UserImage], vision: bool, with_paths: bool) -> String {
+	if images.is_empty() {
+		return String::new();
+	}
+	let lines: Vec<String> = images
+		.iter()
+		.enumerate()
+		.map(|(i, im)| if with_paths { format!("I{}: \"{}\" at {}", i + 1, im.name, im.path.display()) } else { format!("I{}: \"{}\"", i + 1, im.name) })
+		.collect();
+	let n = images.len();
+	let s = if n == 1 { "" } else { "s" };
+	let how = if !vision {
+		"This model cannot see images: say so, and work from the drawing tools and the text instead."
+	} else if with_paths {
+		"They are NOT part of the drawing. Open each with your image or file tool (the path below) and look at it before answering."
+	} else {
+		"They are NOT part of the drawing; they come right after this text."
+	};
+	format!("\n[The estimator attached {n} image{s} to this message. {how}\n{}]", lines.join("\n"))
+}
 
 /// An area of a drawing the estimator attached to a message ("look here").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -63,6 +97,9 @@ pub enum Msg {
 		/// Areas the estimator attached (shown as chips under the message).
 		#[serde(default, skip_serializing_if = "Vec::is_empty")]
 		attachments: Vec<ViewAttachment>,
+		/// Pictures the estimator added (sent to vision models with the message).
+		#[serde(default, skip_serializing_if = "Vec::is_empty")]
+		images: Vec<UserImage>,
 	},
 	Assistant {
 		#[serde(default)]
@@ -102,6 +139,7 @@ pub struct TranscriptEntry {
 	pub tool_ok: Option<bool>,
 	pub image_png: Option<Vec<u8>>,
 	pub attachments: Vec<ViewAttachment>,
+	pub images: Vec<UserImage>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -141,10 +179,10 @@ impl ChatSession {
 		let mut out = Vec::new();
 		for m in &self.messages {
 			match m {
-				Msg::User { text, attachments, .. } => out.push(TranscriptEntry { role: Role::User, text: text.clone(), tool_name: None, tool_ok: None, image_png: None, attachments: attachments.clone() }),
+				Msg::User { text, attachments, images, .. } => out.push(TranscriptEntry { role: Role::User, text: text.clone(), tool_name: None, tool_ok: None, image_png: None, attachments: attachments.clone(), images: images.clone() }),
 				Msg::Assistant { text, .. } => {
 					if !text.trim().is_empty() {
-						out.push(TranscriptEntry { role: Role::Assistant, text: text.clone(), tool_name: None, tool_ok: None, image_png: None, attachments: vec![] });
+						out.push(TranscriptEntry { role: Role::Assistant, text: text.clone(), tool_name: None, tool_ok: None, image_png: None, attachments: vec![], images: vec![] });
 					}
 				}
 				Msg::Tool { name, text, ok, thumb, .. } => out.push(TranscriptEntry {
@@ -154,6 +192,7 @@ impl ChatSession {
 					tool_ok: Some(*ok),
 					image_png: thumb.as_ref().map(|t| t.as_ref().clone()),
 					attachments: vec![],
+					images: vec![],
 				}),
 			}
 		}
@@ -182,6 +221,20 @@ impl ChatSession {
 				}
 			}
 		}
+		// The estimator's own pictures: the newest few go to the model.
+		let mut live_user = std::collections::HashSet::new();
+		let mut seen_user = 0;
+		'user: for (mi, m) in self.messages.iter().enumerate().rev() {
+			if let Msg::User { images, .. } = m {
+				for ii in (0..images.len()).rev() {
+					if seen_user >= MAX_LIVE_USER_IMAGES {
+						break 'user;
+					}
+					live_user.insert((mi, ii));
+					seen_user += 1;
+				}
+			}
+		}
 		let mut pending_images: Vec<Value> = Vec::new();
 		let flush = |out: &mut Vec<Value>, parts: &mut Vec<Value>| {
 			if !parts.is_empty() {
@@ -195,12 +248,28 @@ impl ChatSession {
 				flush(&mut out, &mut pending_images);
 			}
 			match m {
-				Msg::User { text, context, .. } => {
+				Msg::User { text, context, images, .. } => {
 					let content = match context {
 						Some(c) => format!("{c}\n\n{text}"),
 						None => text.clone(),
 					};
-					out.push(json!({"role": "user", "content": content}));
+					if images.is_empty() || !vision {
+						out.push(json!({"role": "user", "content": content}));
+						continue;
+					}
+					let mut parts = vec![json!({"type": "text", "text": content})];
+					for (ii, im) in images.iter().enumerate() {
+						let label = format!("Image I{}: \"{}\"", ii + 1, im.name);
+						match std::fs::read(&im.path) {
+							Ok(bytes) if live_user.contains(&(mi, ii)) => {
+								parts.push(json!({"type": "text", "text": label}));
+								parts.push(image_part(&bytes, model));
+							}
+							Ok(_) => parts.push(json!({"type": "text", "text": format!("[{label} is no longer in context: ask the estimator to attach it again if you need it]")})),
+							Err(_) => parts.push(json!({"type": "text", "text": format!("[{label} could not be loaded: the file is gone]")})),
+						}
+					}
+					out.push(json!({"role": "user", "content": parts}));
 				}
 				Msg::Assistant { text, tool_calls, .. } => {
 					let mut v = json!({"role": "assistant", "content": text});
@@ -285,7 +354,7 @@ mod tests {
 	#[test]
 	fn images_follow_the_tool_run_and_old_ones_are_evicted() {
 		let mut s = ChatSession::new();
-		s.messages.push(Msg::User { text: "count".into(), context: Some("[page 1]".into()), attachments: vec![] });
+		s.messages.push(Msg::User { text: "count".into(), context: Some("[page 1]".into()), attachments: vec![], images: vec![] });
 		for round in 0..4 {
 			s.messages.push(Msg::Assistant { text: String::new(), reasoning: String::new(), tool_calls: vec![ToolCall { id: format!("c{round}a"), name: "view".into(), arguments: "{}".into() }, ToolCall { id: format!("c{round}b"), name: "view".into(), arguments: "{}".into() }] });
 			for k in ["a", "b"] {
@@ -331,7 +400,7 @@ mod tests {
 		assert_eq!(attachments_note(&[], here), "");
 
 		let mut s = ChatSession::new();
-		s.messages.push(Msg::User { text: "what is this".into(), context: Some(note.clone()), attachments: vec![a.clone()] });
+		s.messages.push(Msg::User { text: "what is this".into(), context: Some(note.clone()), attachments: vec![a.clone()], images: vec![] });
 		let back: ChatSession = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
 		assert_eq!(back.transcript()[0].attachments, vec![a]);
 		let api = back.api_messages("sys", "m", true);
@@ -339,5 +408,34 @@ mod tests {
 		// Saved before attachments existed.
 		let old: ChatSession = serde_json::from_str(r#"{"messages":[{"role":"user","text":"hi"}]}"#).unwrap();
 		assert!(old.transcript()[0].attachments.is_empty());
+	}
+
+	#[test]
+	fn user_images_go_to_vision_models_and_are_noted_for_others() {
+		let dir = std::env::temp_dir().join(format!("takeoff-userimg-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let png = dir.join("photo.png");
+		std::fs::write(&png, [0x89, b'P', b'N', b'G']).unwrap();
+		let jpg = dir.join("site.jpg");
+		std::fs::write(&jpg, [0xFF, 0xD8, 0xFF, 0xE0]).unwrap();
+		let images = vec![UserImage { path: png.clone(), name: "photo.png".into() }, UserImage { path: jpg, name: "site.jpg".into() }, UserImage { path: dir.join("gone.png"), name: "gone.png".into() }];
+		let mut s = ChatSession::new();
+		s.messages.push(Msg::User { text: "what is this".into(), context: Some(format!("[Viewer]{}", images_note(&images, true, false))), attachments: vec![], images: images.clone() });
+		let m = s.api_messages("sys", "anthropic/claude", true);
+		let parts = m[1]["content"].as_array().expect("multipart user message");
+		assert!(parts[0]["text"].as_str().unwrap().contains("attached 3 images"));
+		let urls: Vec<&str> = parts.iter().filter_map(|p| p.pointer("/image_url/url").and_then(Value::as_str)).collect();
+		assert_eq!(urls.len(), 2);
+		assert!(urls[0].starts_with("data:image/png;base64,") && urls[1].starts_with("data:image/jpeg;base64,"));
+		assert!(serde_json::to_string(&m).unwrap().contains("could not be loaded"));
+		// A text-only model gets plain text, and the note tells it why.
+		let m = s.api_messages("sys", "m", false);
+		assert!(m[1]["content"].is_string());
+		assert!(images_note(&images, false, false).contains("cannot see images"));
+		assert!(images_note(&images, true, true).contains(&png.display().to_string()));
+		// Saved chats keep the image paths.
+		let back: ChatSession = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+		assert_eq!(back.transcript()[0].images, images);
+		let _ = std::fs::remove_dir_all(&dir);
 	}
 }

@@ -117,6 +117,7 @@ fn view_then_mark_then_finish() {
 		workspace: None,
 		others: vec![],
 		attachments: vec![],
+		images: vec![],
 	};
 	let turn = start_turn(session.clone(), ctx, "Mark the middle square".into());
 	let mut events = Vec::new();

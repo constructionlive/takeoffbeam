@@ -358,6 +358,33 @@ fn parse<T: serde::de::DeserializeOwned>(name: &str, args: Value) -> Result<T, S
 	serde_json::from_value(args).map_err(|e| format!("bad arguments for {name}: {e}"))
 }
 
+/// Some models (GPT through OpenRouter, strict tool schemas) fill in EVERY
+/// optional argument with a blank: `zoom_view: ""`, `zoom_box: [0,0,0,0]`,
+/// `categories: []`, `region: {x:0,y:0,w:0,h:0}`. Read literally those mean
+/// "zoom into view ''" or "draw no categories", and every `view` fails, so the
+/// model never sees the drawing. Treat top-level blanks as "not given".
+pub(crate) fn drop_filler(args: Value) -> Value {
+	let Value::Object(mut obj) = args else { return args };
+	obj.retain(|key, v| {
+		let blank = match v {
+			Value::Null => true,
+			Value::String(s) => {
+				let s = s.trim();
+				s.is_empty() || ((key == "view" || key.ends_with("_view")) && matches!(s.to_ascii_lowercase().as_str(), "none" | "null" | "undefined"))
+			}
+			// A box or point of all zeros is never a real location.
+			Value::Array(a) if (key.ends_with("box") || key == "region") && !a.is_empty() => a.iter().all(|x| x.as_f64() == Some(0.0)),
+			// Empty filters: "no filter", not "nothing".
+			Value::Array(a) => a.is_empty() && matches!(key.as_str(), "categories" | "hidden_layers" | "kinds"),
+			// A zero-size region is a filled-in default, not an area.
+			Value::Object(o) if key == "region" => ["w", "h"].iter().all(|k| o.get(*k).and_then(Value::as_f64).is_none_or(|n| n == 0.0)),
+			_ => false,
+		};
+		!blank
+	});
+	Value::Object(obj)
+}
+
 /// Run one tool.
 pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, String> {
 	// Models sometimes send the arguments as a JSON string.
@@ -365,6 +392,7 @@ pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, St
 		Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
 		other => other,
 	};
+	let args = drop_filler(args);
 	if name == "switch_drawing" {
 		let key = args.get("drawing").and_then(|d| d.as_str().map(str::to_string).or_else(|| d.as_u64().map(|n| n.to_string()))).ok_or("switch_drawing needs drawing (a file name or number from get_drawing)")?;
 		ctx.switch_drawing(&key)?;
@@ -399,5 +427,23 @@ pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, St
 		"add_overlay" => workspace::add_overlay(ctx, parse(name, args)?),
 		"update_overlays" => workspace::update_overlays(ctx, parse(name, args)?),
 		other => Err(format!("unknown tool '{other}'")),
+	}
+}
+
+#[cfg(test)]
+mod filler_tests {
+	use super::drop_filler;
+	use serde_json::json;
+
+	#[test]
+	fn blanks_from_strict_schemas_mean_not_given() {
+		// What GPT sent through construction.live: every optional field filled in.
+		let a = drop_filler(json!({"categories": [], "hidden_layers": [], "max_px": 1800, "page": 4, "region": {"h": 1, "w": 1, "x": 0, "y": 0}, "show_marks": false, "zoom_box": [0, 0, 0, 0], "zoom_view": ""}));
+		assert_eq!(a, json!({"max_px": 1800, "page": 4, "region": {"h": 1, "w": 1, "x": 0, "y": 0}, "show_marks": false}));
+		let a = drop_filler(json!({"zoom_view": "none", "zoom_box": [0, 0, 0, 0], "region": {"x": 0, "y": 0, "w": 0, "h": 0}, "view": null}));
+		assert_eq!(a, json!({}));
+		// Real values stay.
+		let a = drop_filler(json!({"zoom_view": "v3", "zoom_box": [0, 0, 120, 80], "categories": ["Doors"], "ids": []}));
+		assert_eq!(a, json!({"zoom_view": "v3", "zoom_box": [0, 0, 120, 80], "categories": ["Doors"], "ids": []}));
 	}
 }
