@@ -52,3 +52,19 @@ client model. Set `TAKEOFF_MCP_MODEL=gemini` (or `qwen3`) when the client model 
 coordinate convention.
 
 Open the same PDF in Takeoff Desk to see and confirm what the agent marked.
+
+## Serving pages to an app
+
+`takeoff serve plan.pdf` keeps one drawing open and renders pages, or tiles of them, on request:
+JSON, one message per line over stdio. HaloLive's Takeoff Bench uses it so a sheet stays sharp as
+you zoom without reopening the PDF for every tile.
+
+```
+→ {"id":1,"op":"pages"}
+← {"id":1,"ok":true,"pages":[{"page":1,"label":"[1] T1.01 TITLE SHEET","width":36.0,"height":24.0,"unit":"in"}]}
+→ {"id":2,"op":"render","page":1,"dpi":300,"region":[0.5,0.25,0.125,0.125],"out":"/tmp/tile.png"}
+← {"id":2,"ok":true,"out":"/tmp/tile.png","width":1350,"height":900,"dpi":300.0}
+```
+
+The first line out is `{"ready":true,"pages":N,"version":"…"}`; it reopens the PDF if the file
+changes, and exits when stdin closes.

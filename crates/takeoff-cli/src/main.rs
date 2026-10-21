@@ -11,6 +11,7 @@ use takeoff_pdf::tools::SplitMode;
 use takeoff_pdf::{Drawing, FracRect};
 
 mod mcp;
+mod serve;
 
 #[derive(Parser)]
 #[command(name = "takeoff", version, about = "Takeoff Desk: PDF takeoff tools and a drawing agent", propagate_version = true)]
@@ -141,6 +142,8 @@ enum Cmd {
 		/// Drawing to open at start (tools can also open one).
 		pdf: Option<PathBuf>,
 	},
+	/// Keep one drawing open and render its pages and tiles on request (JSON lines over stdio), for apps that show it.
+	Serve { pdf: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -328,6 +331,7 @@ fn run(cli: Cli) -> Result<(), String> {
 		},
 		Cmd::Agent { pdf, prompt, page, base_url, api_key, model, context } => agent(pdf, prompt, page, base_url, api_key, model, context)?,
 		Cmd::Mcp { pdf } => mcp::serve(pdf)?,
+		Cmd::Serve { pdf } => serve::serve(pdf)?,
 	}
 	Ok(())
 }
