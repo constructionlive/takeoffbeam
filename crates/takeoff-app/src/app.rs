@@ -12,7 +12,8 @@ use takeoff_pdf::tools::SplitMode;
 
 use crate::ai_panel::AiPanel;
 use crate::canvas::{Canvas, CanvasRequest};
-use crate::docstate::OpenDoc;
+use crate::docstate::{OpenDoc, ViewMode};
+use crate::graph_view::GraphAction;
 use crate::icons as i;
 use crate::left_panel::{LeftPanel, PageAction};
 use crate::markups::{ListAction, MarkupsList};
@@ -33,6 +34,7 @@ enum Dialog {
 	Shortcuts,
 	About,
 	ConfirmPdfEdit { action: PageAction },
+	DeleteMap,
 }
 
 pub struct TakeoffApp {
@@ -305,8 +307,16 @@ impl TakeoffApp {
 					self.settings.show_badges = !badges;
 					self.settings.save();
 				}
+				if self.docs.get(self.active).is_some_and(|d| d.map.is_some()) {
+					let links = self.settings.map_links;
+					if widgets::icon_button(ui, p, i::EXTERNAL_LINK, if links { "Map links on the sheet: on · click a callout to go to what it names" } else { "Map links on the sheet: off" }, links).clicked() {
+						self.settings.map_links = !links;
+						self.settings.save();
+					}
+				}
 				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 					let ai_on = self.settings.right_panel && self.right.tab == 2;
+					let mode = self.docs.get(self.active).map(|d| d.view_mode);
 					let r = ui.add(egui::Button::new(RichText::new(format!("{}  AI", i::SPARKLES)).font(theme::semibold(12.5)).color(if ai_on { p.on_accent } else { p.accent })).fill(if ai_on { p.accent_fill } else { Color32::TRANSPARENT }).stroke(Stroke::new(1.0, p.accent)).corner_radius(4));
 					if r.on_hover_text("Ask the drawing agent (⌘J)").clicked() {
 						self.toggle_ai();
@@ -314,9 +324,44 @@ impl TakeoffApp {
 					if self.ai.busy() {
 						ui.spinner();
 					}
+					ui.add_space(10.0);
+					if let Some(m) = mode {
+						self.view_switch(ui, p, m);
+					}
 				});
 			});
 		});
+	}
+
+	/// Page | Graph: the sheet itself, or the map of the whole set.
+	fn view_switch(&mut self, ui: &mut egui::Ui, p: &Palette, mode: ViewMode) {
+		let building = self.docs.get(self.active).is_some_and(|d| self.ai.map_chat(&self.settings, &d.path).running_here);
+		let frame = egui::Frame::new().stroke(Stroke::new(1.0, p.border)).corner_radius(5).inner_margin(egui::Margin::same(2));
+		frame.show(ui, |ui| {
+			ui.spacing_mut().item_spacing.x = 2.0;
+			// Right-to-left: Graph is added first so it sits on the right.
+			for (m, icon, label, tip) in [(ViewMode::Graph, i::WAYPOINTS, "Graph", "The map of the whole set: sheets, details, notes and how they relate (⌘G)"), (ViewMode::Page, i::FILE_TEXT, "Page", "The sheet (⌘G)")] {
+				let on = mode == m;
+				let text = if m == ViewMode::Graph && building { format!("{icon}  {label} …") } else { format!("{icon}  {label}") };
+				let r = ui.add(egui::Button::new(RichText::new(text).size(12.5).color(if on { p.text } else { p.text2 })).fill(if on { p.hover } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).corner_radius(4));
+				if r.on_hover_text(tip).clicked() {
+					self.set_view_mode(m);
+				}
+			}
+		});
+	}
+
+	fn set_view_mode(&mut self, m: ViewMode) {
+		if let Some(d) = self.docs.get_mut(self.active) {
+			if d.view_mode != m {
+				// The graph opens on what the Map tab shows (the sheet on screen, or the area picked on it).
+				let focus = d.map_focus();
+				d.view_mode = m;
+				if let (ViewMode::Graph, Some(f)) = (m, focus) {
+					d.graph.select_node(&f);
+				}
+			}
+		}
 	}
 
 	fn toggle_ai(&mut self) {
@@ -334,6 +379,7 @@ impl TakeoffApp {
 			None => t.label().to_string(),
 		};
 		if widgets::icon_button(ui, p, t.icon(), &tip, self.canvas.tool == t).clicked() {
+			self.set_view_mode(ViewMode::Page);
 			self.canvas.set_tool(t);
 			if matches!(t, Tool::Annot(_)) {
 				self.settings.right_panel = true;
@@ -483,6 +529,16 @@ impl TakeoffApp {
 		});
 		ui.menu_button("View", |ui| {
 			ui.set_min_width(220.0);
+			let mode = self.docs.get(self.active).map(|d| d.view_mode);
+			if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Page view", i::FILE_TEXT)).selected(mode == Some(ViewMode::Page))).clicked() {
+				self.set_view_mode(ViewMode::Page);
+				ui.close();
+			}
+			if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Graph view    ⌘G", i::WAYPOINTS)).selected(mode == Some(ViewMode::Graph))).clicked() {
+				self.set_view_mode(ViewMode::Graph);
+				ui.close();
+			}
+			ui.separator();
 			ui.checkbox(&mut self.settings.left_panel, "Pages panel");
 			ui.checkbox(&mut self.settings.right_panel, "Side panel");
 			ui.checkbox(&mut self.settings.markups_list, "Markups list");
@@ -544,13 +600,19 @@ impl TakeoffApp {
 				ui.set_min_height(ui.available_height());
 				ui.set_max_width(ui.available_width());
 				if let Some(d) = self.docs.get_mut(active) {
+					let before = d.page;
 					action = self.left.ui(ui, d, p);
+					if d.view_mode == ViewMode::Graph && d.page != before {
+						let page = d.page;
+						d.map_go(&takeoff_core::docmap::sheet_id(page));
+					}
 				}
 			});
 			if let Some(a) = action {
 				self.page_action(a, &ctx);
 			}
 		}
+		let mut map_action = None;
 		if self.settings.right_panel {
 			egui::Panel::right("right").resizable(true).default_size(340.0).size_range(260.0..=620.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(12, 6)).stroke(Stroke::new(1.0, p.border))).show(ui, |outer| {
 				// Lay the contents out in a child that can't grow the panel: if anything
@@ -563,9 +625,15 @@ impl TakeoffApp {
 				let ui = &mut inner;
 				let sel = self.docs.get(active).map(|d| d.selection.len()).unwrap_or(0);
 				let props = if sel > 0 { format!("Properties ({sel})") } else { "Properties".into() };
-				widgets::tabs(ui, p, &[(i::SIGMA, "Takeoff"), (i::LIST, &props), (i::SPARKLES, "AI")], &mut self.right.tab);
+				widgets::tabs(ui, p, &[(i::SIGMA, "Takeoff"), (i::LIST, &props), (i::SPARKLES, "AI"), (i::WAYPOINTS, "Map")], &mut self.right.tab);
 				ui.separator();
 				match self.right.tab {
+					3 => {
+						let chat = self.docs.get(active).map(|d| self.ai.map_chat(&self.settings, &d.path));
+						if let (Some(d), Some(chat)) = (self.docs.get_mut(active), chat) {
+							map_action = crate::map_panel::ui(ui, d, p, &chat);
+						}
+					}
 					0 => {
 						if let Some(d) = self.docs.get_mut(active) {
 							self.right.takeoff(ui, d, &mut self.canvas, &mut self.settings, p);
@@ -583,6 +651,9 @@ impl TakeoffApp {
 				}
 			});
 		}
+		if let Some(a) = map_action {
+			self.map_action(a);
+		}
 		if self.settings.markups_list {
 			let mut action = None;
 			let r = egui::Panel::bottom("markups").resizable(true).show_separator_line(false).default_size(210.0).size_range(90.0..=600.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 6)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
@@ -599,10 +670,25 @@ impl TakeoffApp {
 				None => {}
 			}
 		}
+		let graph = self.docs.get(active).is_some_and(|d| d.view_mode == ViewMode::Graph);
+		if graph {
+			let chat = self.docs.get(active).map(|d| self.ai.map_chat(&self.settings, &d.path));
+			let mut action = None;
+			egui::CentralPanel::default().frame(egui::Frame::new().fill(p.canvas)).show(ui, |ui| {
+				if let (Some(d), Some(chat)) = (self.docs.get_mut(active), &chat) {
+					action = crate::graph_view::ui(ui, d, p, chat, self.settings.wheel_zooms);
+				}
+			});
+			if let Some(a) = action {
+				self.graph_action(a);
+			}
+			return;
+		}
 		egui::CentralPanel::default().frame(egui::Frame::new().fill(p.canvas)).show(ui, |ui| {
 			if let Some(d) = self.docs.get_mut(active) {
 				let (snap, wheel) = (self.settings.snap, self.settings.wheel_zooms);
 				self.canvas.user_moved = false;
+				self.canvas.map_links = self.settings.map_links;
 				self.canvas.ui(ui, d, p, snap, wheel);
 				// Panning or zooming yourself while the AI works stops following it.
 				if self.canvas.user_moved && self.settings.follow_agent && self.ai.busy() {
@@ -670,6 +756,104 @@ impl TakeoffApp {
 		});
 	}
 
+	// ── Document map ────────────────────────────────────────────────────
+
+	fn graph_action(&mut self, a: GraphAction) {
+		let active = self.active;
+		match a {
+			GraphAction::StartChat { instructions, fresh } => self.start_map_chat(instructions, fresh),
+			GraphAction::Stop => self.ai.stop(),
+			GraphAction::OpenChat => {
+				self.settings.right_panel = true;
+				self.right.tab = 2;
+			}
+			GraphAction::Delete => self.dialog = Some(Dialog::DeleteMap),
+			GraphAction::Focus(id) => {
+				if let Some(d) = self.docs.get_mut(active) {
+					d.map_go(&id);
+				}
+				self.show_map_tab();
+			}
+			GraphAction::Open(id) => self.open_on_sheet(&id),
+		}
+	}
+
+	/// The Map tab, in view.
+	fn show_map_tab(&mut self) {
+		self.settings.right_panel = true;
+		self.right.tab = 3;
+	}
+
+	/// Page view, at a node of the map (onto the trail).
+	fn open_on_sheet(&mut self, id: &str) {
+		if let Some(d) = self.docs.get_mut(self.active) {
+			d.view_mode = ViewMode::Page;
+			d.map_go(id);
+		}
+	}
+
+	fn map_action(&mut self, a: crate::map_panel::MapAction) {
+		use crate::map_panel::MapAction;
+		let active = self.active;
+		match a {
+			MapAction::Go(id) => {
+				if let Some(d) = self.docs.get_mut(active) {
+					d.map_go(&id);
+				}
+			}
+			MapAction::Step(k) => {
+				if let Some(d) = self.docs.get_mut(active) {
+					d.map_step(k);
+				}
+			}
+			MapAction::OpenOnSheet(id) => self.open_on_sheet(&id),
+			MapAction::ShowInGraph(id) => {
+				self.set_view_mode(ViewMode::Graph);
+				if let Some(d) = self.docs.get_mut(active) {
+					d.map_go(&id);
+				}
+			}
+			MapAction::Ask { page, region, title } => {
+				let Some(path) = self.docs.get(active).map(|d| d.path.clone()) else { return };
+				let region = region.map(|r| (r.x, r.y, r.w, r.h)).unwrap_or((0.0, 0.0, 1.0, 1.0));
+				self.ai.ask_about(takeoff_agent::ViewAttachment { drawing: path, page, region }, &format!("What is {title}, and what does it connect to?"));
+				self.settings.right_panel = true;
+				self.right.tab = 2;
+			}
+			MapAction::StartMapping => self.set_view_mode(ViewMode::Graph),
+			MapAction::OpenChat => {
+				self.settings.right_panel = true;
+				self.right.tab = 2;
+			}
+		}
+	}
+
+	/// Map the set: a new conversation in the AI tab, on the chat's model.
+	fn start_map_chat(&mut self, instructions: String, fresh: bool) {
+		let active = self.active;
+		let Some(d) = self.docs.get_mut(active) else { return };
+		if fresh {
+			d.delete_map();
+		}
+		let resume = d.map.as_ref().is_some_and(|m| !m.sheets.is_empty());
+		let mut text = String::from("Map this drawing set: build the document map.");
+		if resume {
+			text.push_str(" A map is already started: keep what is there and carry on with the sheets not mapped yet.");
+		}
+		if !instructions.is_empty() {
+			text.push_str(&format!("\n\n{instructions}"));
+		}
+		let d = &self.docs[active];
+		match self.ai.start_map_chat(text, d, &self.settings) {
+			Ok(()) => {
+				self.docs[active].map_status = None;
+				self.settings.right_panel = true;
+				self.right.tab = 2;
+			}
+			Err(e) => self.docs[active].map_status = Some((e, true)),
+		}
+	}
+
 	/// Take the canvas to where the AI is looking (switching tabs if needed).
 	fn follow_agent(&mut self) {
 		let Some((path, page, region)) = self.ai.follow_request.take() else { return };
@@ -683,6 +867,7 @@ impl TakeoffApp {
 				self.docs[idx].canvas_rect = c;
 			}
 			self.active = idx;
+			self.docs[idx].view_mode = ViewMode::Page;
 			self.docs[idx].zoom_to(page, region);
 		}
 	}
@@ -892,7 +1077,16 @@ impl TakeoffApp {
 			self.close_active();
 			return;
 		}
+		if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::G))) {
+			let next = if d.view_mode == ViewMode::Graph { ViewMode::Page } else { ViewMode::Graph };
+			self.set_view_mode(next);
+			return;
+		}
 		if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::F))) {
+			if d.view_mode == ViewMode::Graph {
+				ctx.memory_mut(|m| m.request_focus(egui::Id::new("graph-search")));
+				return;
+			}
 			self.settings.left_panel = true;
 			self.left.focus_search();
 		}
@@ -908,6 +1102,24 @@ impl TakeoffApp {
 			d.zoom_at(c, 0.8);
 		}
 		if typing {
+			return;
+		}
+		// Back / Forward along the map trail (⌥← ⌥→, ⌘[ ⌘]).
+		let (back, fwd) = ctx.input_mut(|i| {
+			let alt = |k| egui::KeyboardShortcut::new(Modifiers::ALT, k);
+			(i.consume_shortcut(&alt(Key::ArrowLeft)) || i.consume_shortcut(&cmd(Key::OpenBracket)), i.consume_shortcut(&alt(Key::ArrowRight)) || i.consume_shortcut(&cmd(Key::CloseBracket)))
+		});
+		if back {
+			d.map_back();
+		}
+		if fwd {
+			d.map_forward();
+		}
+		// The graph has no tools, selection or pages to step through.
+		if d.view_mode == ViewMode::Graph {
+			if ctx.input(|i| i.key_pressed(Key::Escape)) {
+				d.graph.deselect();
+			}
 			return;
 		}
 		if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::Z)) || i.consume_shortcut(&cmd(Key::Y))) {
@@ -1026,6 +1238,7 @@ impl TakeoffApp {
 			Dialog::Shortcuts => "Keyboard shortcuts",
 			Dialog::About => "About Takeoff Desk",
 			Dialog::ConfirmPdfEdit { .. } => "Change the PDF file?",
+			Dialog::DeleteMap => "Delete the document map?",
 		};
 		let modal = egui::Modal::new(egui::Id::new("dialog")).frame(egui::Frame::popup(&ctx.global_style()).inner_margin(18).corner_radius(8));
 		let resp = modal.show(ctx, |ui| {
@@ -1240,6 +1453,21 @@ impl TakeoffApp {
 						}
 					});
 				}
+				Dialog::DeleteMap => {
+					ui.label(RichText::new("The map of sheets, details and links is removed from this drawing. The AI stops using it, and mapping the set again starts from nothing.").color(p.text2));
+					ui.add_space(8.0);
+					ui.horizontal(|ui| {
+						if ui.add(egui::Button::new(RichText::new("Delete map").color(Color32::WHITE)).fill(p.danger)).clicked() {
+							if let Some(d) = self.docs.get_mut(self.active) {
+								d.delete_map();
+							}
+							keep = false;
+						}
+						if widgets::secondary_button(ui, p, "Cancel").clicked() {
+							keep = false;
+						}
+					});
+				}
 				Dialog::Settings => {
 					egui::Grid::new("prefs").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
 						ui.label("Your name");
@@ -1298,6 +1526,8 @@ impl TakeoffApp {
 							("⌘C ⌘V ⌘D", "Copy, paste, duplicate"),
 							("⌘F", "Search text"),
 							("⌘J", "Ask the AI"),
+							("⌘G", "Page / Graph view"),
+							("⌥← / ⌥→", "Back / forward along the map"),
 							("PgUp / PgDn", "Previous / next page"),
 							("⌘0", "Fit page"),
 						] {

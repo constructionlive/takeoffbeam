@@ -2,13 +2,15 @@
 
 ```
 takeoff-core     model, geometry, numbering, page remap, snap engine, coordinate dialects,
-                 document store (undo/redo), markups list + CSV, sidecar I/O       — no I/O deps
+                 document store (undo/redo), markups list + CSV, sidecar I/O, the document
+                 map (sheets, areas, links)                                          — no I/O deps
 takeoff-pdf      pdfium: render page/region, text + search, bookmarks, vectors; own lazy PDF
                  object reader for layers; page tools + takeoff-aware ops; burn-in; flattened export
 takeoff-models   GGUF header reader, memory-fit estimate, model catalog/store/downloads,
                  llama-server supervisor
 takeoff-cloud    construction.live device-code sign-in, keychain token, models, chat base URL
-takeoff-agent    OpenAI-compatible streaming client, the agent loop, drawing tools, vision pipelines
+takeoff-agent    OpenAI-compatible streaming client, the agent loop (with parallel subagents),
+                 drawing tools, the document-map tools, vision pipelines
 takeoff-app      egui desktop app
 takeoff-cli      `takeoff` CLI and the MCP server
 ```

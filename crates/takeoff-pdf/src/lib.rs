@@ -14,6 +14,7 @@ pub mod outline;
 pub mod overlay;
 pub mod search;
 pub mod tools;
+pub mod trace;
 pub mod vectors;
 
 use std::collections::HashSet;
@@ -153,7 +154,13 @@ impl Seek for ChainReader {
 impl Drawing {
 	pub fn open(path: impl AsRef<Path>) -> Result<Self, PdfError> {
 		let path = path.as_ref().to_path_buf();
-		let doc = pdfium()?.load_pdf_from_file(&path, None)?;
+		// Two threads loading at once can fail inside pdfium (parallel
+		// subagents each open the drawing): one load at a time.
+		static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+		let doc = {
+			let _one = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+			pdfium()?.load_pdf_from_file(&path, None)?
+		};
 		// Layer list is optional: a parse failure just means "no layer control".
 		let layers = layers::LayerInfo::read(&path).ok().flatten();
 		Ok(Self { doc, path, layers, hidden: HashSet::new() })

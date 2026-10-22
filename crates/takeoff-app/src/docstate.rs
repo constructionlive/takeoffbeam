@@ -2,13 +2,14 @@
 //! render worker, page textures, the view (page, zoom, pan), selection and
 //! autosave.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use parking_lot::Mutex;
+use takeoff_core::docmap::{self, DocMap, NodeRef, PartKind, Region};
 use takeoff_core::snap::SnapIndex;
 use takeoff_core::{Document, Point, TakeoffData};
 use takeoff_pdf::outline::Bookmark;
@@ -42,6 +43,77 @@ pub struct SearchState {
 	pub hits: Vec<Hit>,
 	pub done: bool,
 	pub active: Option<usize>,
+}
+
+/// What the central area shows: the sheet, or the map of the whole set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+	#[default]
+	Page,
+	Graph,
+}
+
+/// One place in the map trail: a node, and where the sheet view was when
+/// we were there (restored exactly on Back, like a previous view).
+#[derive(Debug, Clone)]
+pub struct Stop {
+	pub node: String,
+	pub view: Option<(u32, f32, Vec2)>,
+}
+
+/// Moving around the document map: what the Map tab shows and the trail
+/// behind it (Back / Forward, the breadcrumb).
+#[derive(Debug, Default)]
+pub struct MapNav {
+	pub trail: Vec<Stop>,
+	pub pos: usize,
+	/// What the Map tab shows when set; None = the sheet on screen.
+	pub focus: Option<String>,
+	/// The node just arrived at, outlined on the sheet for a moment.
+	pub flash: Option<(String, Instant)>,
+}
+
+/// What the map shows, shared by the graph, the Pages list and the sheet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapFilter {
+	/// Empty = every discipline.
+	pub disciplines: BTreeSet<String>,
+	/// Area kinds shown as cards in the graph.
+	pub kinds: HashSet<PartKind>,
+}
+
+impl Default for MapFilter {
+	fn default() -> Self {
+		Self { disciplines: BTreeSet::new(), kinds: PartKind::ALL.into_iter().filter(|k| *k != PartKind::TitleBlock).collect() }
+	}
+}
+
+impl MapFilter {
+	/// Whether a sheet of this discipline passes.
+	pub fn sheet(&self, discipline: Option<&str>) -> bool {
+		self.disciplines.is_empty() || self.disciplines.contains(&discipline_key(discipline))
+	}
+}
+
+/// The discipline a sheet is filed under, tidied: "civil/track" and
+/// "CIVIL - Track" both read "Civil/Track" ("Other" when the AI gave none).
+/// The part before the slash is its group.
+pub fn discipline_key(d: Option<&str>) -> String {
+	let d = d.map(str::trim).filter(|d| !d.is_empty()).unwrap_or("Other");
+	let title = |w: &str| {
+		let w = w.trim();
+		let mut c = w.chars();
+		c.next().map(|f| f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase()).unwrap_or_default()
+	};
+	d.replace(" - ", "/").replace(['\\', '|', ':', '>'], "/").split('/').map(title).filter(|w| !w.is_empty()).collect::<Vec<_>>().join("/")
+}
+
+/// "Civil/Track" → ("Civil", Some("Track")).
+pub fn discipline_parts(key: &str) -> (&str, Option<&str>) {
+	match key.split_once('/') {
+		Some((g, s)) => (g, Some(s)),
+		None => (key, None),
+	}
 }
 
 pub struct OpenDoc {
@@ -82,6 +154,24 @@ pub struct OpenDoc {
 	pub save_error: Option<String>,
 	/// Page history for Back/Forward.
 	pub history: Vec<u32>,
+
+	pub view_mode: ViewMode,
+	/// The document map, from `plan.pdf.map.json` (None until one is built).
+	/// The AI writes the file as it maps; it is read again when it changes.
+	pub map: Option<DocMap>,
+	map_stamp: Option<std::time::SystemTime>,
+	map_checked: Instant,
+	/// Why the last map action failed.
+	pub map_status: Option<(String, bool)>,
+	pub graph: crate::graph_view::GraphState,
+	pub nav: MapNav,
+	pub map_filter: MapFilter,
+	/// Lines followed in the page's picture, by (page, ends); None = no line.
+	traced: HashMap<(u32, [u64; 4]), Option<Vec<Point>>>,
+	traced_requested: HashSet<(u32, [u64; 4])>,
+	/// Graph view card images, by key.
+	pub crops: HashMap<String, TextureHandle>,
+	crops_requested: HashSet<String>,
 }
 
 impl OpenDoc {
@@ -92,6 +182,8 @@ impl OpenDoc {
 		let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 		// Page sizes arrive with `Opened`; until then the document has none.
 		let doc = Document::new(data, vec![], author);
+		let map = takeoff_core::docmap::load(&path);
+		let map_stamp = map_stamp(&path);
 		Ok(Self {
 			path,
 			name,
@@ -124,6 +216,18 @@ impl OpenDoc {
 			last_change: None,
 			save_error: None,
 			history: vec![],
+			view_mode: ViewMode::Page,
+			map,
+			map_stamp,
+			map_checked: Instant::now(),
+			map_status: None,
+			graph: Default::default(),
+			nav: MapNav::default(),
+			map_filter: MapFilter::default(),
+			crops: HashMap::new(),
+			crops_requested: HashSet::new(),
+			traced: HashMap::new(),
+			traced_requested: HashSet::new(),
 		})
 	}
 
@@ -154,6 +258,8 @@ impl OpenDoc {
 		if page_count_changed {
 			self.thumbs.clear();
 			self.thumbs_requested.clear();
+			self.crops.clear();
+			self.crops_requested.clear();
 		}
 		self.base.clear();
 		self.base_requested.clear();
@@ -196,6 +302,14 @@ impl OpenDoc {
 					let tex = ctx.load_texture(format!("thumb-{page}"), image, TextureOptions::LINEAR);
 					self.thumbs.insert(page, tex);
 				}
+				Res::Crop { key, image } => {
+					let tex = ctx.load_texture(format!("crop-{key}"), image, TextureOptions::LINEAR);
+					self.crops.insert(key, tex);
+				}
+				Res::Trace { page, a, b, run } => {
+					self.traced.insert(trace_key(page, a, b), run);
+					changed = true;
+				}
 				Res::Segments { page, segments } => {
 					let (w, h) = self.page_size(page);
 					self.snap = Some((page, Arc::new(SnapIndex::new(segments, w, h))));
@@ -215,6 +329,8 @@ impl OpenDoc {
 					self.sharp_key = None;
 					self.thumbs.clear();
 					self.thumbs_requested.clear();
+					self.crops.clear();
+					self.crops_requested.clear();
 				}
 				Res::Compare { page, image, changed } => {
 					if let Some(c) = &mut self.compare {
@@ -227,7 +343,222 @@ impl OpenDoc {
 				Res::Error(e) => self.error = Some(e),
 			}
 		}
+		changed |= self.poll_map(ctx);
 		changed
+	}
+
+	/// The line followed in this page's picture from `a` to `b`: Some(result)
+	/// once the worker has traced it, None while it works (asked for here).
+	pub fn trace_raster(&mut self, a: Point, b: Point) -> Option<Option<Vec<Point>>> {
+		let key = trace_key(self.page, a, b);
+		if let Some(r) = self.traced.get(&key) {
+			return Some(r.clone());
+		}
+		if self.traced_requested.insert(key) {
+			self.worker.send(Req::Trace { page: self.page, a, b });
+		}
+		None
+	}
+
+	/// A render of `region` of `page` for a graph card, cached under `key`.
+	pub fn crop(&mut self, key: &str, page: u32, region: Region, max_px: u32) -> Option<TextureHandle> {
+		if let Some(t) = self.crops.get(key) {
+			return Some(t.clone());
+		}
+		if self.crops_requested.insert(key.to_string()) {
+			self.worker.send(Req::Crop { key: key.to_string(), page, region: FracRect { x: region.x, y: region.y, w: region.w, h: region.h }, max_px });
+		}
+		None
+	}
+
+	// ── Document map ────────────────────────────────────────────────────
+
+	pub fn delete_map(&mut self) {
+		let _ = takeoff_core::docmap::delete(&self.path);
+		self.map = None;
+		self.map_stamp = None;
+		self.map_status = None;
+		self.graph = Default::default();
+		self.nav = MapNav::default();
+		self.map_filter = MapFilter::default();
+	}
+
+	/// The node the Map tab shows: the one moved to, while its sheet is the
+	/// one on screen (or the graph shows); else the sheet on screen.
+	pub fn map_focus(&self) -> Option<String> {
+		let map = self.map.as_ref()?;
+		let graph = self.view_mode == crate::docstate::ViewMode::Graph;
+		self.nav.focus.clone().filter(|f| map.node(f).is_some() && (graph || docmap::page_of(f) == Some(self.page))).or_else(|| {
+			let id = docmap::sheet_id(self.page);
+			map.node(&id).map(|_| id)
+		})
+	}
+
+	/// Show a node in the Map tab without moving (a click on the sheet).
+	pub fn map_peek(&mut self, id: &str) {
+		self.nav.focus = Some(id.to_string());
+		self.graph.selected = Some(id.to_string());
+	}
+
+	fn view_now(&self) -> (u32, f32, Vec2) {
+		(self.page, self.zoom, self.pan)
+	}
+
+	/// Go to a node: onto the trail, and there (the sheet zoomed to it, or
+	/// the graph centred on it).
+	pub fn map_go(&mut self, id: &str) {
+		let Some(map) = &self.map else { return };
+		if map.node(id).is_none() {
+			return;
+		}
+		// Remember where we are, so Back comes here.
+		let here = self.map_focus().unwrap_or_else(|| docmap::sheet_id(self.page));
+		let view = Some(self.view_now());
+		match self.nav.trail.get_mut(self.nav.pos) {
+			Some(s) if s.node == here => s.view = view,
+			_ => {
+				self.nav.trail.truncate(self.nav.pos + usize::from(!self.nav.trail.is_empty()));
+				self.nav.trail.push(Stop { node: here, view });
+				self.nav.pos = self.nav.trail.len() - 1;
+			}
+		}
+		if self.nav.trail[self.nav.pos].node == id {
+			self.show_node(id, None);
+			return;
+		}
+		self.nav.trail.truncate(self.nav.pos + 1);
+		self.nav.trail.push(Stop { node: id.to_string(), view: None });
+		if self.nav.trail.len() > 60 {
+			self.nav.trail.remove(0);
+		}
+		self.nav.pos = self.nav.trail.len() - 1;
+		self.show_node(id, None);
+	}
+
+	pub fn can_go_back(&self) -> bool {
+		self.nav.pos > 0 && !self.nav.trail.is_empty()
+	}
+
+	pub fn can_go_forward(&self) -> bool {
+		self.nav.pos + 1 < self.nav.trail.len()
+	}
+
+	/// Step along the trail (-1 back, +1 forward, or to index `to`).
+	pub fn map_step(&mut self, to: usize) {
+		if to >= self.nav.trail.len() || to == self.nav.pos {
+			return;
+		}
+		let view = self.view_now();
+		if let Some(s) = self.nav.trail.get_mut(self.nav.pos) {
+			s.view = Some(view);
+		}
+		self.nav.pos = to;
+		let stop = self.nav.trail[to].clone();
+		self.show_node(&stop.node, stop.view);
+	}
+
+	pub fn map_back(&mut self) {
+		if self.can_go_back() {
+			self.map_step(self.nav.pos - 1);
+		}
+	}
+
+	pub fn map_forward(&mut self) {
+		if self.can_go_forward() {
+			self.map_step(self.nav.pos + 1);
+		}
+	}
+
+	/// Put a node on screen: restore a remembered view, or frame it.
+	fn show_node(&mut self, id: &str, view: Option<(u32, f32, Vec2)>) {
+		self.nav.focus = Some(id.to_string());
+		self.graph.select_node(id);
+		if self.view_mode == ViewMode::Graph {
+			return;
+		}
+		let Some(node) = self.map.as_ref().and_then(|m| m.node(id)).map(|n| (n.page(), n.region())) else { return };
+		match (view, node) {
+			(Some((page, zoom, pan)), _) => {
+				self.go_to_page(page);
+				self.zoom = zoom;
+				self.pan = pan;
+				self.fit_pending = false;
+				self.touch_view();
+			}
+			(None, (page, Some(r))) => {
+				// A little room around it, so you see where it sits; tiny callouts
+				// get more, or the view would be all bubble.
+				let pad = (r.w.max(r.h) * 0.12).max(0.03);
+				self.zoom_to(page, (r.x - pad, r.y - pad, r.w + 2.0 * pad, r.h + 2.0 * pad));
+			}
+			(None, (page, None)) => {
+				self.go_to_page(page);
+				self.fit_pending = true;
+			}
+		}
+		self.nav.flash = Some((id.to_string(), Instant::now()));
+	}
+
+	/// The map's sheets that pass the discipline filter, in page order (None = no map).
+	pub fn filtered_pages(&self) -> Option<Vec<u32>> {
+		let map = self.map.as_ref()?;
+		if self.map_filter.disciplines.is_empty() {
+			return None;
+		}
+		Some(map.sheets.iter().filter(|s| self.map_filter.sheet(s.discipline.as_deref())).map(|s| s.page).collect())
+	}
+
+	/// "A-101 · Floor plan" from the map, if the page is in it.
+	pub fn sheet_name(&self, page: u32) -> Option<String> {
+		let s = self.map.as_ref()?.sheet(page)?;
+		s.number.as_ref()?;
+		Some(s.name())
+	}
+
+	/// The map area on this page under a page point: the smallest, callouts first.
+	pub fn map_area_at(&self, pt: Point) -> Option<String> {
+		let s = self.map.as_ref()?.sheet(self.page)?;
+		let hits = s.parts.iter().filter(|p| p.kind != PartKind::TitleBlock && p.region.is_some_and(|r| r.contains(pt.x, pt.y)));
+		hits.min_by(|a, b| (a.kind != PartKind::Callout, a.region.unwrap().area()).partial_cmp(&(b.kind != PartKind::Callout, b.region.unwrap().area())).unwrap_or(std::cmp::Ordering::Equal)).map(|p| p.id.clone())
+	}
+
+	/// Where a node's links lead (targets of links from it), for a click on it.
+	pub fn map_targets(&self, id: &str) -> Vec<String> {
+		let Some(map) = &self.map else { return vec![] };
+		map.links.iter().filter(|l| l.from == id).map(|l| l.to.clone()).collect()
+	}
+
+	/// A node's short name for the breadcrumb ("A-101", "Detail 3").
+	pub fn crumb(&self, id: &str) -> String {
+		let Some(n) = self.map.as_ref().and_then(|m| m.node(id)) else { return id.to_string() };
+		match n {
+			NodeRef::Sheet(s) => s.number.clone().unwrap_or_else(|| format!("p{}", s.page)),
+			NodeRef::Part(_, p) => match (&p.label, p.title.trim()) {
+				(Some(l), _) if p.kind == PartKind::Callout => l.clone(),
+				(Some(l), _) => format!("{} {l}", p.kind.label()),
+				(None, "") => p.kind.label().to_string(),
+				(None, t) => t.chars().take(24).collect(),
+			},
+		}
+	}
+
+	/// Read the map again when its file changed (the AI saves after every step).
+	fn poll_map(&mut self, ctx: &egui::Context) -> bool {
+		// While the graph shows, look for the AI's writes even when nothing else repaints.
+		if self.view_mode == ViewMode::Graph {
+			ctx.request_repaint_after(Duration::from_millis(800));
+		}
+		if self.map_checked.elapsed() < Duration::from_millis(700) {
+			return false;
+		}
+		self.map_checked = Instant::now();
+		let stamp = map_stamp(&self.path);
+		if stamp == self.map_stamp {
+			return false;
+		}
+		self.map_stamp = stamp;
+		self.map = takeoff_core::docmap::load(&self.path);
+		true
 	}
 
 	pub fn thumb(&mut self, page: u32) -> Option<TextureHandle> {
@@ -487,4 +818,12 @@ impl OpenDoc {
 		self.loaded = false;
 		self.worker.send(Req::Reload);
 	}
+}
+
+fn map_stamp(pdf: &std::path::Path) -> Option<std::time::SystemTime> {
+	std::fs::metadata(takeoff_core::docmap::map_path(pdf)).and_then(|m| m.modified()).ok()
+}
+
+fn trace_key(page: u32, a: Point, b: Point) -> (u32, [u64; 4]) {
+	(page, [a.x, a.y, b.x, b.y].map(f64::to_bits))
 }

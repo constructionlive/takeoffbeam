@@ -176,6 +176,154 @@ impl SnapIndex {
 	}
 }
 
+/// How the tracker steps along a drawn line (page px, i.e. points of paper).
+const TRACK_SNAP: f64 = 8.0;
+/// Sideways tolerance: the line must pass this close to where it was heading.
+const TRACK_TOL: f64 = 2.5;
+/// Longest gap jumped (the blanks of a dashed or centre line).
+const TRACK_GAP: f64 = 18.0;
+/// Lines turning more than this away from the heading are other lines (crossings).
+const TRACK_TURN_DEG: f64 = 35.0;
+
+impl SnapIndex {
+	/// The nearest point on any line within `tol_px`, with that segment.
+	fn on_line(&self, p: Point, tol_px: f64) -> Option<(Point, usize)> {
+		let tol_frac = tol_px / self.page_w.min(self.page_h);
+		self.near(p, tol_frac)
+			.into_iter()
+			.map(|i| (self.project(p, &self.segments[i]), i))
+			.map(|(q, i)| (self.dist_px(p, q), q, i))
+			.filter(|(d, _, _)| *d <= tol_px)
+			.min_by(|a, b| a.0.total_cmp(&b.0))
+			.map(|(_, q, i)| (q, i))
+	}
+
+	/// A segment's direction in px, unit length.
+	fn dir_px(&self, i: usize) -> (f64, f64) {
+		let s = self.segments[i];
+		let (dx, dy) = ((s.b.x - s.a.x) * self.page_w, (s.b.y - s.a.y) * self.page_h);
+		let l = dx.hypot(dy).max(1e-12);
+		(dx / l, dy / l)
+	}
+
+	/// Follow the drawn line from near `from` to near `to`: step along it,
+	/// jumping the gaps of dashed lines, passing lines that cross it, and
+	/// keeping to it when another runs alongside. The path traced (dense,
+	/// then simplified), or None if no single line leads from one to the other.
+	pub fn track(&self, from: Point, to: Point) -> Option<Vec<Point>> {
+		let (b, _) = self.on_line(to, TRACK_SNAP)?;
+		// Where lines meet at the start (a crossing, a fork), try first the
+		// nearest one heading towards the target.
+		let tol_frac = TRACK_SNAP / self.page_w.min(self.page_h);
+		let chord = ((b.x - from.x) * self.page_w, (b.y - from.y) * self.page_h);
+		let cl = chord.0.hypot(chord.1).max(1e-9);
+		let mut starts: Vec<(f64, f64, Point, usize)> = self
+			.near(from, tol_frac)
+			.into_iter()
+			.filter_map(|i| {
+				let q = self.project(from, &self.segments[i]);
+				let d = self.dist_px(from, q);
+				let dir = self.dir_px(i);
+				let align = ((dir.0 * chord.0 + dir.1 * chord.1) / cl).abs();
+				(d <= TRACK_SNAP).then_some((align, d, q, i))
+			})
+			.collect();
+		// Nearest first, but a line heading across (a crossing) counts as far away;
+		// lines side by side (rails) still go by distance.
+		let score = |x: &(f64, f64, Point, usize)| x.1 + (1.0 - x.0) * 40.0;
+		starts.sort_by(|x, y| score(x).total_cmp(&score(y)));
+		starts.dedup_by(|x, y| x.3 == y.3);
+		starts.into_iter().take(4).filter_map(|(_, _, a, sa)| self.track_from(a, sa, b, to)).find(|run| crate::geometry::plausible_trace(run, from, to, self.page_w, self.page_h))
+	}
+
+	fn track_from(&self, a: Point, sa: usize, b: Point, to: Point) -> Option<Vec<Point>> {
+		let (w, h) = (self.page_w, self.page_h);
+		let px = |p: Point| (p.x * w, p.y * h);
+		let pt = |q: (f64, f64)| Point { x: q.0 / w, y: q.1 / h };
+		let (target, start) = (px(b), px(a));
+		let chord = (target.0 - start.0).hypot(target.1 - start.1);
+		if chord < 1.0 {
+			return Some(vec![a, b]);
+		}
+		let step = (chord / 300.0).clamp(1.0, 3.0);
+		let cos_turn = TRACK_TURN_DEG.to_radians().cos();
+		// Head along the starting segment, towards the target.
+		let mut dir = self.dir_px(sa);
+		if dir.0 * (target.0 - start.0) + dir.1 * (target.1 - start.1) < 0.0 {
+			dir = (-dir.0, -dir.1);
+		}
+		// End on the line being followed, carried on to opposite where the
+		// target was asked for (another line may be nearer to that point).
+		let asked = px(to);
+		let finish = |mut path: Vec<(f64, f64)>, cur: (f64, f64), dir: (f64, f64)| {
+			let t = ((asked.0 - cur.0) * dir.0 + (asked.1 - cur.1) * dir.1).clamp(0.0, TRACK_GAP);
+			path.push((cur.0 + dir.0 * t, cur.1 + dir.1 * t));
+			let pts: Vec<Point> = path.into_iter().map(pt).collect();
+			crate::geometry::simplify(&pts, 0.25, w, h)
+		};
+		let mut cur = start;
+		let mut path = vec![start];
+		let mut travelled = 0.0;
+		let tol_frac = TRACK_TOL / w.min(h);
+		for _ in 0..200_000 {
+			let left = (target.0 - cur.0).hypot(target.1 - cur.1);
+			let ahead = (target.0 - cur.0) * dir.0 + (target.1 - cur.1) * dir.1;
+			// Arrived: close, or just past it.
+			if left <= step * 1.5 || (ahead < 0.0 && left <= TRACK_GAP) {
+				return Some(finish(path, cur, dir));
+			}
+			// The line where we're heading, a step on (further, across a gap).
+			let mut found = None;
+			let mut k = 1.0;
+			while found.is_none() && k * step <= TRACK_GAP.max(step) {
+				let pred = (cur.0 + dir.0 * step * k, cur.1 + dir.1 * step * k);
+				let pp = pt(pred);
+				found = self
+					.near(pp, tol_frac)
+					.into_iter()
+					.filter_map(|i| {
+						let d = self.dir_px(i);
+						let c = d.0 * dir.0 + d.1 * dir.1;
+						if c.abs() < cos_turn {
+							return None;
+						}
+						let q = px(self.project(pp, &self.segments[i]));
+						let off = (q.0 - pred.0).hypot(q.1 - pred.1);
+						// It must take us forward (the end of the dash we're on doesn't).
+						let gain = (q.0 - cur.0) * dir.0 + (q.1 - cur.1) * dir.1;
+						(off <= TRACK_TOL && gain > step * 0.25).then_some((off, q, if c < 0.0 { (-d.0, -d.1) } else { d }))
+					})
+					.min_by(|x, y| x.0.total_cmp(&y.0));
+				k += 1.0;
+			}
+			// The line ends (or turns away) within a gap of the target: that's arriving too.
+			let Some((_, q, seg_dir)) = found else {
+				if left <= TRACK_GAP {
+					return Some(finish(path, cur, dir));
+				}
+				return None;
+			};
+			let mv = (q.0 - cur.0, q.1 - cur.1);
+			let len = mv.0.hypot(mv.1);
+			if len < 1e-6 {
+				return None;
+			}
+			// Turn with the line (its own direction, steadied by the step taken).
+			let blend = (seg_dir.0 * 0.7 + mv.0 / len * 0.3, seg_dir.1 * 0.7 + mv.1 / len * 0.3);
+			let bl = blend.0.hypot(blend.1).max(1e-12);
+			dir = (blend.0 / bl, blend.1 / bl);
+			cur = q;
+			path.push(cur);
+			travelled += len;
+			// Wandered off along some other line.
+			if travelled > chord * 3.0 + 60.0 {
+				return None;
+			}
+		}
+		None
+	}
+}
+
 fn intersect(s: &Segment, t: &Segment) -> Option<Point> {
 	let (x1, y1, x2, y2) = (s.a.x, s.a.y, s.b.x, s.b.y);
 	let (x3, y3, x4, y4) = (t.a.x, t.a.y, t.b.x, t.b.y);
@@ -262,5 +410,44 @@ mod tests {
 	fn ortho_locks_to_45() {
 		let q = ortho(p(0.0, 0.0), p(0.5, 0.02), 1000.0, 1000.0);
 		assert!(q.y.abs() < 1e-12);
+	}
+
+	/// A dashed quarter circle (radius 300 px), a line crossing it, and a
+	/// second arc 4 px outside it, like a pair of rails.
+	fn dashed_curve() -> SnapIndex {
+		let (cx, cy, r) = (500.0, 500.0, 300.0);
+		let mut segs = Vec::new();
+		for (radius, dashed) in [(r, true), (r + 4.0, false)] {
+			let n = 180;
+			for k in 0..n {
+				// Dashes: 6 drawn, 3 blank (in 0.5° steps ≈ 2.6 px each).
+				if dashed && k % 9 >= 6 {
+					continue;
+				}
+				let (a0, a1) = (k as f64 / n as f64 * std::f64::consts::FRAC_PI_2, (k + 1) as f64 / n as f64 * std::f64::consts::FRAC_PI_2);
+				segs.push(Segment { a: p((cx + radius * a0.cos()) / 1000.0, (cy + radius * a0.sin()) / 1000.0), b: p((cx + radius * a1.cos()) / 1000.0, (cy + radius * a1.sin()) / 1000.0) });
+			}
+		}
+		// A road crossing the curve at 45°, square to it.
+		segs.push(Segment { a: p(0.5, 0.5), b: p(0.95, 0.95) });
+		SnapIndex::new(segs, 1000.0, 1000.0)
+	}
+
+	#[test]
+	fn track_follows_a_dashed_curve_across_a_crossing() {
+		let g = dashed_curve();
+		let (from, to) = (p(0.8, 0.5), p(0.5, 0.8));
+		let run = g.track(from, to).expect("tracked");
+		let len = crate::geometry::polyline_length_px(&run, 1000.0, 1000.0);
+		let arc = 300.0 * std::f64::consts::FRAC_PI_2;
+		assert!((len - arc).abs() < 1.5, "length {len:.2} vs arc {arc:.2}");
+		// It kept to the dashed rail, not the solid one 4 px outside.
+		for q in &run {
+			let r = (q.x * 1000.0 - 500.0).hypot(q.y * 1000.0 - 500.0);
+			assert!((r - 300.0).abs() < 1.5, "off the rail: r = {r:.2}");
+		}
+		assert!(run.len() < 200, "simplified: {} points", run.len());
+		// Nothing leads from the curve to a point off every line.
+		assert!(g.track(from, p(0.1, 0.1)).is_none());
 	}
 }

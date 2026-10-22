@@ -94,9 +94,13 @@ reads positions off a numbered **view** (`v3`) and the tools convert them.
 | Tool | What it does |
 |---|---|
 | `get_drawing` | Pages, scales, items with counts, layers |
+| `document_map` | The set's [document map](graph-view.md): what each sheet is, the areas on it, how they relate |
+| `contact_sheet` | Up to 24 pages in one picture, with their title-block text, to survey a set |
+| `map_sheets` / `map_add` / `map_remove` | Build the map: the sheet index, areas (boxed off a view) and links with a note on how they relate |
+| `delegate` | Hand parts of a long job to subagents that run in parallel (the app's own agent; Claude Code uses its own `Agent` tool) |
 | `view` | Render a page or region with markups and badges; registers a view id |
 | `read_items` / `find_items_at` | List items; find which item is at a spot in a view |
-| `add_marks` / `add_measurements` | Count marks; lengths, areas, angles (optionally snapped to lines) |
+| `add_marks` / `add_measurements` | Count marks; lengths, areas, angles (optionally snapped to lines). `path: follow` runs a length along the drawing's own line between the points (curves, dashes, crossings); `path: smooth` curves through them |
 | `update_items` / `delete_items` | Edit or remove items |
 | `create_category` / `update_category` | Takeoff items |
 | `summary` | Counts and totals per page and item |

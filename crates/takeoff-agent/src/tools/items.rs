@@ -247,6 +247,68 @@ pub struct MeasurementArg {
 	pub note: Option<String>,
 	pub depth: Option<f64>,
 	pub closed: Option<bool>,
+	/// straight (default) | smooth | follow — how to join the points.
+	pub path: Option<String>,
+}
+
+/// Join the points the way asked: straight; `smooth`, a curve through them;
+/// `follow`, along the drawing's own line between each pair (dashes and
+/// crossings included). Returns the points to store and a word on what happened.
+pub(super) fn shape_path(ctx: &mut ToolCtx, page: u32, pts: Vec<Point>, closed: bool, mode: Option<&str>) -> Result<(Vec<Point>, String), String> {
+	let mode = mode.map(|m| m.trim().to_lowercase()).unwrap_or_default();
+	let (w, h) = ctx.doc.lock().page_size_pt(page);
+	match mode.as_str() {
+		"" | "straight" | "lines" => Ok((pts, String::new())),
+		"smooth" | "curve" | "spline" | "arc" => {
+			let out = takeoff_core::geometry::smooth_path(&pts, closed, w, h);
+			Ok((out, format!(" Smoothed into a curve through the {} points.", pts.len())))
+		}
+		"follow" | "trace" | "along" => {
+			// The drawing's own vector lines first; where there are none (a scan,
+			// a flattened sheet, lines over a photo), the line in the picture.
+			let idx = ctx.snap_index(page)?;
+			let mut ends: Vec<(Point, Point)> = pts.windows(2).map(|p| (p[0], p[1])).collect();
+			if closed && pts.len() > 2 {
+				ends.push((pts[pts.len() - 1], pts[0]));
+			}
+			let mut out: Vec<Point> = Vec::new();
+			let (mut vector, mut picture) = (0, 0);
+			let mut missed = Vec::new();
+			for (k, (a, b)) in ends.iter().enumerate() {
+				let run = match (!idx.is_empty()).then(|| idx.track(*a, *b)).flatten() {
+					Some(r) => {
+						vector += 1;
+						r
+					}
+					None => match ctx.drawing.track_raster(page, *a, *b).ok().flatten() {
+						Some(r) => {
+							picture += 1;
+							r
+						}
+						None => {
+							missed.push(format!("{}→{}", k + 1, (k + 1) % pts.len() + 1));
+							vec![*a, *b]
+						}
+					},
+				};
+				let skip = usize::from(!out.is_empty());
+				out.extend(run.into_iter().skip(skip));
+			}
+			if closed && out.len() > 2 && out.first() == out.last() {
+				out.pop();
+			}
+			let mut note = format!(" Followed the drawn line on {} of {} span(s)", vector + picture, ends.len());
+			if picture > 0 {
+				note.push_str(&format!(" ({picture} in the picture, as there are no vector lines there)"));
+			}
+			note.push_str(&format!(", {} vertices.", out.len()));
+			if !missed.is_empty() {
+				note.push_str(&format!(" No single drawn line joins points {}: those spans are straight. Put both points ON one drawn line (not between two, e.g. a track centreline that isn't drawn), and add a point where it bends sharply or forks; or use path \"smooth\".", missed.join(", ")));
+			}
+			Ok((out, note))
+		}
+		other => Err(format!("unknown path '{other}' (straight, smooth, follow)")),
+	}
 }
 
 #[derive(Deserialize)]
@@ -300,6 +362,18 @@ pub fn add_measurements(ctx: &mut ToolCtx, a: AddMeasurementsArgs) -> Result<Too
 			_ => moved_note = " No drawing lines here (scanned sheet?) — vertices kept as given.".into(),
 		}
 	}
+	// Curves: follow the drawn line, or smooth through the points.
+	let mut path_notes = String::new();
+	for s in shapes.iter_mut() {
+		if s.0 == MeasurementType::Angle || s.3.path.is_none() {
+			continue;
+		}
+		let closed = s.1 || s.0 == MeasurementType::Area;
+		let (pts, note) = shape_path(ctx, v.page, std::mem::take(&mut s.2), closed, s.3.path.as_deref())?;
+		s.2 = pts;
+		path_notes.push_str(&note);
+	}
+	let moved_note = moved_note + &path_notes;
 	let default_kind = shapes.first().map(|s| if s.0 == MeasurementType::Area { CategoryKind::Area } else { CategoryKind::Length }).unwrap_or(CategoryKind::Length);
 	let cat = match &a.category {
 		Some(c) => Some(resolve_category(ctx, c, default_kind, true, None)?),
@@ -357,6 +431,8 @@ pub struct ItemPatch {
 	pub label: Option<String>,
 	pub text: Option<String>,
 	pub depth: Option<f64>,
+	/// With points: straight | smooth | follow (as in add_measurements).
+	pub path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -389,11 +465,17 @@ pub fn update_items(ctx: &mut ToolCtx, a: UpdateItemsArgs) -> Result<ToolOutput,
 			(Some(_), None) => return Err(format!("{}: a new box needs the view it was read from", p.id)),
 			_ => None,
 		};
-		let pts = match (&p.points, &view) {
+		let mut pts = match (&p.points, &view) {
 			(Some(ps), Some(v)) => Some(ps.iter().map(|x| view_point_to_page(v, x)).collect::<Result<Vec<_>, _>>()?),
 			(Some(_), None) => return Err(format!("{}: new points need the view they were read from", p.id)),
 			_ => None,
 		};
+		if let (Some(mode), Some(v)) = (p.path.as_deref(), &view) {
+			if let Some(ps) = pts.take() {
+				let closed = ctx.doc.lock().data.measurements.iter().find(|m| m.id == p.id).map(|m| m.closed || m.kind == MeasurementType::Area).unwrap_or(false);
+				pts = Some(shape_path(ctx, v.page, ps, closed, Some(mode))?.0);
+			}
+		}
 		let cat = match &p.category {
 			Some(c) if c.is_empty() || c == "none" => Some(None),
 			Some(c) => Some(Some(resolve_category(ctx, c, CategoryKind::Count, false, None)?)),

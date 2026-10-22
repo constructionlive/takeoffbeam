@@ -55,6 +55,9 @@ pub(crate) fn viewer_line(doc: &Mutex<takeoff_core::Document>, drawing: &takeoff
 	}
 	let has_scale = doc.lock().data.scale_for(current_page).is_some();
 	s.push_str(if has_scale { " · page is scaled" } else { " · page has no scale" });
+	if let Some(m) = crate::tools::map::presence(drawing.path()) {
+		s.push_str(&format!(" · {m}"));
+	}
 	if !others.is_empty() {
 		let file = drawing.path().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
 		s.push_str(&format!(" · this tab: \"{file}\" · also open: {}", others.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(", ")));
@@ -106,20 +109,149 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 	let _ = tctx.drawing.set_hidden_layers(&hidden);
 	let ctx_line = ctx_line + &crate::session::attachments_note(&ctx.attachments, &ctx.pdf_path) + &crate::session::images_note(&ctx.images, provider.vision, false);
 	session.lock().messages.push(Msg::User { text: user_text, context: Some(ctx_line), attachments: ctx.attachments.clone(), images: ctx.images.clone() });
+	let mut tool_defs = openai_tools(tctx.workspace.is_some());
+	tool_defs.push(delegate_def());
+	let env = DelegateEnv { doc: ctx.doc.clone(), pdf: ctx.pdf_path.clone(), workspace: ctx.workspace.clone(), provider: provider.clone(), current_page: ctx.current_page };
+	let steps = run_loop(session, &mut tctx, &system, &provider, &tool_defs, tx, cancel, MAX_STEPS, Some(&env));
+	if steps >= MAX_STEPS {
+		let _ = tx.send(AgentEvent::Error(format!("Stopped after {MAX_STEPS} steps. Say \"continue\" to carry on.")));
+	}
+	steps
+}
+
+/// What a `delegate` call needs to start subagents on the same drawing.
+struct DelegateEnv {
+	doc: Arc<Mutex<takeoff_core::Document>>,
+	pdf: std::path::PathBuf,
+	workspace: Option<std::path::PathBuf>,
+	provider: crate::ProviderConfig,
+	current_page: u32,
+}
+
+/// Subagents running at once, and the most one call may hand out.
+const DELEGATE_PARALLEL: usize = 6;
+const DELEGATE_MAX_TASKS: usize = 12;
+const SUB_STEPS: u32 = 120;
+const SUB_REPORT_CHARS: usize = 4000;
+
+fn delegate_def() -> Value {
+	json!({"type": "function", "function": {
+		"name": "delegate",
+		"description": "Hand pieces of a long job to subagents that work IN PARALLEL (up to 6 at once), each with a fresh context and the same drawing tools. They see nothing of this conversation: give each a self-contained brief (what to do, which pages, what to record with which tools, what to report back). Returns each one's final report. For jobs too big for one context: mapping a whole set, taking off many sheets.",
+		"parameters": {"type": "object", "properties": {"tasks": {"type": "array", "items": {"type": "object", "properties": {
+			"title": {"type": "string", "description": "Short name, e.g. \"Architectural sheets 1-12\"."},
+			"brief": {"type": "string"}}, "required": ["title", "brief"]}}}, "required": ["tasks"], "additionalProperties": false}
+	}})
+}
+
+const SUBAGENT_NOTE: &str = "\n\n# You are a subagent\n\nAnother agent handed you the brief below as part of a larger job, and other subagents are working on other parts at the same time. Nobody reads your messages until you finish, so do not ask questions or wait for answers: do the work with your tools, saving as you go, then end with a short report of what you did, what you recorded and what you could not resolve. Stay inside your brief.";
+
+fn delegate(env: &DelegateEnv, args: &Value, tx: &Sender<AgentEvent>, cancel: &Arc<AtomicBool>) -> Result<String, String> {
+	let tasks: Vec<(String, String)> = args
+		.get("tasks")
+		.and_then(Value::as_array)
+		.ok_or("delegate needs tasks: [{title, brief}]")?
+		.iter()
+		.filter_map(|t| Some((t.get("title")?.as_str()?.trim().to_string(), t.get("brief")?.as_str()?.trim().to_string())))
+		.filter(|(_, b)| !b.is_empty())
+		.collect();
+	if tasks.is_empty() {
+		return Err("delegate needs tasks: [{title, brief}], each with a brief".into());
+	}
+	if tasks.len() > DELEGATE_MAX_TASKS {
+		return Err(format!("at most {DELEGATE_MAX_TASKS} tasks per call; group the work or call again"));
+	}
+	let file = env.pdf.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+	let next = std::sync::atomic::AtomicUsize::new(0);
+	let reports: Mutex<Vec<Option<String>>> = Mutex::new(vec![None; tasks.len()]);
+	// Only what the estimator should see live passes through: the map and the
+	// takeoff changing, and where the agents are looking.
+	let (sub_tx, sub_rx) = unbounded::<AgentEvent>();
+	let fwd = tx.clone();
+	let forward = std::thread::spawn(move || {
+		for e in sub_rx {
+			if matches!(e, AgentEvent::DocChanged | AgentEvent::Viewport { .. } | AgentEvent::Usage { .. }) {
+				let _ = fwd.send(e);
+			}
+		}
+	});
+	std::thread::scope(|s| {
+		for _ in 0..DELEGATE_PARALLEL.min(tasks.len()) {
+			s.spawn(|| loop {
+				let i = next.fetch_add(1, Ordering::Relaxed);
+				if i >= tasks.len() || cancel.load(Ordering::Relaxed) {
+					break;
+				}
+				let report = run_subagent(env, &file, &tasks[i].1, &sub_tx, cancel);
+				reports.lock()[i] = Some(match report {
+					Ok(r) => r,
+					Err(e) => format!("(failed: {e})"),
+				});
+			});
+		}
+	});
+	drop(sub_tx);
+	let _ = forward.join();
+	let reports = reports.into_inner();
+	let mut out = String::new();
+	for (i, ((title, _), r)) in tasks.iter().zip(reports).enumerate() {
+		out.push_str(&format!("## Subagent {} · {title}\n{}\n\n", i + 1, r.unwrap_or_else(|| "(not started: cancelled)".into())));
+	}
+	Ok(out.trim_end().to_string())
+}
+
+fn run_subagent(env: &DelegateEnv, file: &str, brief: &str, tx: &Sender<AgentEvent>, cancel: &Arc<AtomicBool>) -> Result<String, String> {
+	let drawing = takeoff_pdf::Drawing::open(&env.pdf).map_err(|e| format!("could not open the drawing: {e}"))?;
+	let pages = drawing.page_count();
+	let system = system_prompt(file, pages, env.provider.vision, env.workspace.as_deref()) + SUBAGENT_NOTE;
+	let mut tctx = ToolCtx::new(env.doc.clone(), drawing, &env.provider.model, Some(env.provider.clone()));
+	tctx.events = Some(tx.clone());
+	tctx.current_page = env.current_page;
+	tctx.cancel = Some(cancel.clone());
+	tctx.workspace = env.workspace.clone();
+	let hidden: HashSet<String> = env.doc.lock().data.hidden_layers.iter().cloned().collect();
+	let _ = tctx.drawing.set_hidden_layers(&hidden);
+	let session = Arc::new(Mutex::new(ChatSession::new()));
+	let line = viewer_line(&env.doc, &tctx.drawing, env.current_page, None, &[], &[]);
+	session.lock().messages.push(Msg::User { text: brief.to_string(), context: Some(line), attachments: vec![], images: vec![] });
 	let tool_defs = openai_tools(tctx.workspace.is_some());
+	let steps = run_loop(&session, &mut tctx, &system, &env.provider, &tool_defs, tx, cancel, SUB_STEPS, None);
+	let s = session.lock();
+	let last = s.messages.iter().rev().find_map(|m| match m {
+		Msg::Assistant { text, .. } if !text.trim().is_empty() => Some(text.trim().to_string()),
+		_ => None,
+	});
+	let mut report = last.unwrap_or_else(|| "(no report)".into());
+	if report.len() > SUB_REPORT_CHARS {
+		let cut = report.char_indices().nth(SUB_REPORT_CHARS).map(|(i, _)| i).unwrap_or(report.len());
+		report.truncate(cut);
+		report.push('…');
+	}
+	if steps >= SUB_STEPS {
+		report.push_str(&format!("\n(stopped after {SUB_STEPS} steps: the brief may not be finished)"));
+	}
+	Ok(report)
+}
+
+/// Stream, run the tools asked for, repeat. `env`: this agent may delegate.
+#[allow(clippy::too_many_arguments)]
+fn run_loop(session: &Arc<Mutex<ChatSession>>, tctx: &mut ToolCtx, system: &str, provider: &crate::ProviderConfig, tool_defs: &[Value], tx: &Sender<AgentEvent>, cancel: &Arc<AtomicBool>, max_steps: u32, env: Option<&DelegateEnv>) -> u32 {
 	let mut steps = 0;
 	let mut failures_in_a_row = 0;
-	while steps < MAX_STEPS {
+	while steps < max_steps {
 		if cancel.load(Ordering::Relaxed) {
 			break;
 		}
-		compact_if_needed(session, &system, &provider, tx);
-		let messages = session.lock().api_messages(&system, &provider.model, provider.vision);
-		let result = llm::stream(&provider, &messages, &tool_defs, cancel, |d| {
-			let _ = tx.send(match d {
-				Delta::Text(t) => AgentEvent::TextDelta(t),
-				Delta::Reasoning(t) => AgentEvent::ReasoningDelta(t),
-			});
+		compact_if_needed(session, system, provider, tx);
+		let messages = session.lock().api_messages(system, &provider.model, provider.vision);
+		let main = env.is_some();
+		let result = llm::stream(provider, &messages, tool_defs, cancel, |d| {
+			if main {
+				let _ = tx.send(match d {
+					Delta::Text(t) => AgentEvent::TextDelta(t),
+					Delta::Reasoning(t) => AgentEvent::ReasoningDelta(t),
+				});
+			}
 		});
 		let completion = match result {
 			Ok(c) => c,
@@ -127,7 +259,11 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 			Err(e) => {
 				failures_in_a_row += 1;
 				if failures_in_a_row >= 2 {
-					let _ = tx.send(AgentEvent::Error(e));
+					if main {
+						let _ = tx.send(AgentEvent::Error(e));
+					} else {
+						session.lock().messages.push(Msg::Assistant { text: format!("(stopped: the model failed twice: {e})"), reasoning: String::new(), tool_calls: vec![] });
+					}
 					break;
 				}
 				std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -153,28 +289,40 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 				continue;
 			}
 			let args: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({"_raw": call.arguments}));
-			let _ = tx.send(AgentEvent::ToolStarted { call_id: call.id.clone(), name: call.name.clone(), args: args.clone() });
+			if main {
+				let _ = tx.send(AgentEvent::ToolStarted { call_id: call.id.clone(), name: call.name.clone(), args: args.clone() });
+			}
 			let (ok, mut text, images) = if args.get("_raw").is_some() {
 				(false, format!("Your arguments for {} were not valid JSON: {}", call.name, call.arguments.chars().take(300).collect::<String>()), vec![])
+			} else if call.name == "delegate" {
+				match env.map(|e| delegate(e, &args, tx, cancel)) {
+					Some(Ok(t)) => (true, t, vec![]),
+					Some(Err(e)) => (false, format!("Error: {e}"), vec![]),
+					None => (false, "Error: subagents can't delegate further; do the work yourself.".into(), vec![]),
+				}
 			} else {
-				match tools::call(&mut tctx, &call.name, args) {
+				match tools::call(tctx, &call.name, args) {
 					Ok(o) => (true, o.text, o.images),
 					Err(e) => (false, format!("Error: {e}"), vec![]),
 				}
 			};
-			clip_tool_text(&mut text);
+			if call.name != "delegate" {
+				clip_tool_text(&mut text);
+			}
 			let mut tool_images = Vec::new();
 			let mut captions = Vec::new();
 			let mut first_thumb = None;
 			for img in &images {
-				if first_thumb.is_none() {
+				if first_thumb.is_none() && main {
 					first_thumb = thumb(&img.png);
 				}
 				captions.push(img.caption.clone());
 				tool_images.push(ToolImage { png: Arc::new(img.png.clone()), width: img.width, height: img.height, caption: img.caption.clone() });
 			}
-			let summary = text.lines().next().unwrap_or("").chars().take(300).collect::<String>();
-			let _ = tx.send(AgentEvent::ToolFinished { call_id: call.id.clone(), name: call.name.clone(), ok, summary, image: first_thumb.as_ref().map(|t| t.0.clone()) });
+			if main {
+				let summary = text.lines().next().unwrap_or("").chars().take(300).collect::<String>();
+				let _ = tx.send(AgentEvent::ToolFinished { call_id: call.id.clone(), name: call.name.clone(), ok, summary, image: first_thumb.as_ref().map(|t| t.0.clone()) });
+			}
 			session.lock().messages.push(Msg::Tool {
 				call_id: call.id.clone(),
 				name: call.name.clone(),
@@ -185,9 +333,6 @@ fn run(session: &Arc<Mutex<ChatSession>>, ctx: AgentContext, user_text: String, 
 				thumb: first_thumb.map(|t| Arc::new(t.1)),
 			});
 		}
-	}
-	if steps >= MAX_STEPS {
-		let _ = tx.send(AgentEvent::Error(format!("Stopped after {MAX_STEPS} steps. Say \"continue\" to carry on.")));
 	}
 	steps
 }

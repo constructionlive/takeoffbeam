@@ -10,6 +10,7 @@
 //! imports into the platform (which keeps the parts it knows).
 
 pub mod coords;
+pub mod docmap;
 pub mod doc;
 pub mod geometry;
 pub mod list;

@@ -436,7 +436,7 @@ impl RightPanel {
 					canvas.set_tool(Tool::Select);
 				} else {
 					canvas.active_category = Some(cid.clone());
-					canvas.set_tool(match cat.kind() { CategoryKind::Count => Tool::Count, CategoryKind::Length => if canvas.tool == Tool::Perimeter { Tool::Perimeter } else { Tool::Length }, CategoryKind::Area => Tool::Area });
+					canvas.set_tool(match cat.kind() { CategoryKind::Count => Tool::Count, CategoryKind::Length => if matches!(canvas.tool, Tool::Perimeter | Tool::Curve | Tool::Trace) { canvas.tool } else { Tool::Length }, CategoryKind::Area => Tool::Area });
 				}
 			}
 			r.on_hover_text(if active { "Click again to stop (or press Esc)" } else { "Click to take off this item" });

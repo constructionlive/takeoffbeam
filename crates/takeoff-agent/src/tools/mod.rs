@@ -6,6 +6,7 @@
 
 mod defs;
 mod items;
+pub mod map;
 mod pages;
 mod render;
 mod scale;
@@ -110,7 +111,8 @@ pub struct ToolCtx {
 	active: usize,
 }
 
-const MAX_VIEWS: usize = 64;
+// Parallel subagents share one context over MCP: keep enough views for all of them.
+const MAX_VIEWS: usize = 256;
 
 impl ToolCtx {
 	pub fn new(doc: Arc<Mutex<Document>>, drawing: Drawing, model_id: &str, llm: Option<ProviderConfig>) -> Self {
@@ -401,6 +403,11 @@ pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, St
 	ctx.follow_views(&args)?;
 	match name {
 		"get_drawing" => pages::get_drawing(ctx),
+		"document_map" => map::document_map(ctx, parse(name, args)?),
+		"map_sheets" => map::map_sheets(ctx, parse(name, args)?),
+		"map_add" => map::map_add(ctx, parse(name, args)?),
+		"map_remove" => map::map_remove(ctx, parse(name, args)?),
+		"contact_sheet" => map::contact_sheet(ctx, parse(name, args)?),
 		"view" => render::view(ctx, parse(name, args)?),
 		"read_items" => items::read_items(ctx, parse(name, args)?),
 		"find_items_at" => items::find_items_at(ctx, parse(name, args)?),

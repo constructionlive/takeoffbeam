@@ -549,3 +549,37 @@ pub fn burn_svg(img: &mut RgbaImage, region: FracRect, svg: &str) -> Result<(), 
 	img.copy_from_slice(pix.data());
 	Ok(())
 }
+
+/// A box (x, y, w, h in page fractions), its label and its colour.
+pub type LabelledBox = ((f64, f64, f64, f64), String, (u8, u8, u8));
+
+/// Outlined boxes (page fractions within `region`), each with an optional
+/// label pill at its top-left: the map tools' check renders.
+pub fn burn_boxes(img: &mut RgbaImage, region: FracRect, boxes: &[LabelledBox]) {
+	let (w, h) = img.dimensions();
+	let Some(pix) = Pixmap::new(w, h) else { return };
+	let mut c = Canvas { pix, region, opts_scale: 1.0 };
+	c.pix.data_mut().copy_from_slice(img.as_raw());
+	let size = (w.max(h) as f32 / 70.0).clamp(11.0, 22.0);
+	for ((x, y, bw, bh), label, rgb) in boxes {
+		let (x0, y0) = c.to_px(Point { x: *x, y: *y });
+		let (x1, y1) = c.to_px(Point { x: x + bw, y: y + bh });
+		if let Some(p) = c.rect_path(x0, y0, x1, y1) {
+			c.stroke(&p, *rgb, 0.95, (size / 5.0).max(2.0), None);
+		}
+		if !label.is_empty() {
+			c.label(x0, (y0 - size * 1.4).max(0.0), size, label, (255, 255, 255), *rgb);
+		}
+	}
+	img.copy_from_slice(c.pix.data());
+}
+
+/// A text pill at image pixel (x, y), top-left anchored.
+pub fn burn_label(img: &mut RgbaImage, x: f32, y: f32, size: f32, text: &str, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+	let (w, h) = img.dimensions();
+	let Some(pix) = Pixmap::new(w, h) else { return };
+	let mut c = Canvas { pix, region: FracRect::FULL, opts_scale: 1.0 };
+	c.pix.data_mut().copy_from_slice(img.as_raw());
+	c.label(x, y, size, text, fg, bg);
+	img.copy_from_slice(c.pix.data());
+}

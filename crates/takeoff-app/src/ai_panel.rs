@@ -66,6 +66,20 @@ struct ChannelInfo {
 	launch_error: Option<String>,
 }
 
+/// What Graph view shows about the chat that maps the set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapChat {
+	/// The chat's model, as its picker shows it.
+	pub model: String,
+	pub color: Color32,
+	/// The AI is mapping this drawing's set right now.
+	pub running_here: bool,
+	/// The AI is busy with something else.
+	pub busy_elsewhere: bool,
+	/// No model chosen yet.
+	pub unset: bool,
+}
+
 /// "claude:opus" → (Claude Code, "opus").
 fn channel_model(model: &str) -> Option<(Channel, &str)> {
 	let (k, m) = model.split_once(':')?;
@@ -119,6 +133,8 @@ pub struct AiPanel {
 	sessions: HashMap<PathBuf, Arc<Mutex<ChatSession>>>,
 	turn: Option<TurnHandle>,
 	turn_doc: Option<PathBuf>,
+	/// The drawing whose set the running turn is mapping (started from Graph view).
+	mapping: Option<PathBuf>,
 	live: Live,
 	input: String,
 	/// Message waiting for the local model to finish loading.
@@ -164,6 +180,7 @@ impl AiPanel {
 			sessions: HashMap::new(),
 			turn: None,
 			turn_doc: None,
+			mapping: None,
 			live: Live::default(),
 			input: String::new(),
 			queued: None,
@@ -402,6 +419,10 @@ impl AiPanel {
 
 	fn provider(&mut self, settings: &Settings) -> Result<ProviderConfig, String> {
 		let m = settings.model.clone();
+		self.provider_for(&m, settings)
+	}
+
+	fn provider_for(&mut self, m: &str, settings: &Settings) -> Result<ProviderConfig, String> {
 		if let Some(id) = m.strip_prefix("local:") {
 			let model = self.installed.iter().find(|x| x.id == id).cloned().ok_or("That model is no longer installed")?;
 			let running = self.server.as_ref().is_some_and(|s| s.model_id() == model.id);
@@ -434,6 +455,43 @@ impl AiPanel {
 			});
 		}
 		Err("Choose a model first".into())
+	}
+
+	// ── Document maps ───────────────────────────────────────────────────
+
+	/// The chat as Graph view describes it, for the drawing at `path`.
+	pub fn map_chat(&self, settings: &Settings, path: &PathBuf) -> MapChat {
+		let (model, color, _) = self.model_label(settings);
+		let running = self.busy();
+		let here = running && self.mapping.as_ref() == Some(path);
+		MapChat { model, color, running_here: here, busy_elsewhere: running && !here, unset: settings.model.is_empty() }
+	}
+
+	/// Start mapping the set in a fresh conversation (the current one goes to history).
+	pub fn start_map_chat(&mut self, text: String, doc: &OpenDoc, settings: &Settings) -> Result<(), String> {
+		if self.busy() {
+			return Err("The AI is still working on another message. Stop it or let it finish, then start mapping.".into());
+		}
+		self.new_conversation(&doc.path);
+		self.send(text, doc, settings);
+		match self.live.error.clone() {
+			Some(e) => Err(e),
+			None => {
+				self.mapping = Some(doc.path.clone());
+				Ok(())
+			}
+		}
+	}
+
+	/// Attach an area to the next message and put a question in the prompt
+	/// (unless the estimator is already writing one).
+	pub fn ask_about(&mut self, att: ViewAttachment, question: &str) {
+		if !self.attached.contains(&att) {
+			self.attached.push(att);
+		}
+		if self.input.trim().is_empty() {
+			self.input = question.to_string();
+		}
 	}
 
 	fn cache(settings: &Settings) -> CacheType {
@@ -659,6 +717,7 @@ impl AiPanel {
 		}
 		if finished || disconnected {
 			self.turn = None;
+			self.mapping = None;
 			if let Some(p) = self.turn_doc.take() {
 				self.save_session(&p);
 			}

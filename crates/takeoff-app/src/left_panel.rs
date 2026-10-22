@@ -18,6 +18,8 @@ pub struct LeftPanel {
 	layer_filter: String,
 	/// Pages ticked for page tools.
 	pub picked: HashSet<u32>,
+	/// Discipline groups folded shut in the Pages list.
+	folded: HashSet<String>,
 }
 
 /// Page actions the app runs (they rewrite the PDF and remap the takeoff).
@@ -90,7 +92,25 @@ impl LeftPanel {
 				action = Some(PageAction::Delete { pages: picked.clone() });
 			}
 		});
-		let label = if self.picked.is_empty() { format!("{n} page{} · click a thumbnail's corner to pick several", if n == 1 { "" } else { "s" }) } else { format!("{} of {n} picked · Esc to clear", self.picked.len()) };
+		// Disciplines from the document map: one compact filter, and the list grouped under them.
+		let map = doc.map.clone().filter(|m| m.sheets.len() > 1);
+		let groups = map.as_ref().map(crate::graph_view::discipline_groups).unwrap_or_default();
+		let grouped = groups.iter().map(|g| g.subs.len()).sum::<usize>() > 1;
+		if let (Some(map), true) = (&map, grouped) {
+			ui.add_space(2.0);
+			let w = ui.available_width() - 2.0;
+			crate::graph_view::discipline_menu(ui, p, map, &mut doc.map_filter, w);
+			ui.add_space(2.0);
+		}
+		let shown: Vec<u32> = doc.filtered_pages().unwrap_or_else(|| (1..=n).collect());
+		let filtered = shown.len() as u32 != n;
+		let label = if !self.picked.is_empty() {
+			format!("{} of {n} picked · Esc to clear", self.picked.len())
+		} else if filtered {
+			format!("{} of {n} pages", shown.len())
+		} else {
+			format!("{n} page{} · click a thumbnail's corner to pick several", if n == 1 { "" } else { "s" })
+		};
 		widgets::hint(ui, p, &label);
 		if !self.picked.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
 			self.picked.clear();
@@ -123,13 +143,83 @@ impl LeftPanel {
 			let (w, h) = doc.page_size(1);
 			thumb_w * (h / w) as f32 + 30.0
 		};
-		ScrollArea::vertical().auto_shrink(false).show_rows(ui, row_h, n as usize, |ui, range| {
+		// Rows: a header per discipline (in the order the set uses them), then its pages.
+		enum Row {
+			Head(String, egui::Color32, usize, bool),
+			Page(u32),
+		}
+		let mut rows: Vec<Row> = Vec::new();
+		if grouped {
+			let mut seen: Vec<u32> = Vec::new();
+			for g in &groups {
+				for (key, _, _) in &g.subs {
+					let pages: Vec<u32> = shown.iter().copied().filter(|pg| doc.map.as_ref().and_then(|m| m.sheet(*pg)).is_some_and(|s| crate::docstate::discipline_key(s.discipline.as_deref()) == *key)).collect();
+					if pages.is_empty() {
+						continue;
+					}
+					let folded = self.folded.contains(key);
+					rows.push(Row::Head(key.clone(), g.color, pages.len(), folded));
+					seen.extend(&pages);
+					if !folded {
+						rows.extend(pages.into_iter().map(Row::Page));
+					}
+				}
+			}
+			let rest: Vec<u32> = shown.iter().copied().filter(|pg| !seen.contains(pg)).collect();
+			if !rest.is_empty() {
+				let key = "Not in the map".to_string();
+				let folded = self.folded.contains(&key);
+				rows.push(Row::Head(key, p.muted, rest.len(), folded));
+				if !folded {
+					rows.extend(rest.into_iter().map(Row::Page));
+				}
+			}
+		} else {
+			rows.extend(shown.iter().copied().map(Row::Page));
+		}
+		const HEAD_H: f32 = 30.0;
+		let heights: Vec<f32> = rows.iter().map(|r| if matches!(r, Row::Head(..)) { HEAD_H } else { row_h }).collect();
+		let total: f32 = heights.iter().sum();
+		let mut toggle: Option<String> = None;
+		ScrollArea::vertical().auto_shrink(false).show_viewport(ui, |ui, vp| {
 			ui.set_max_width(width);
-			for idx in range {
-				let page = idx as u32 + 1;
+			let (full, _) = ui.allocate_exact_size(Vec2::new(width, total), Sense::hover());
+			let mut y = 0.0;
+			for (k, r) in rows.iter().enumerate() {
+				let h = heights[k];
+				let top = y;
+				y += h;
+				if top + h < vp.min.y || top > vp.max.y {
+					continue;
+				}
+				let rect = egui::Rect::from_min_size(egui::pos2(full.left(), full.top() + top), Vec2::new(width, h));
+				let page = match r {
+					Row::Head(key, color, count, folded) => {
+						let resp = ui.interact(rect, ui.id().with(("disc", key)), Sense::click());
+						let painter = ui.painter();
+						if resp.hovered() {
+							painter.rect_filled(rect.shrink2(Vec2::new(0.0, 2.0)), 4.0, p.hover);
+							ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+						}
+						let c = rect.left_center();
+						painter.text(c + Vec2::new(8.0, 0.0), egui::Align2::CENTER_CENTER, if *folded { i::CHEVRON_RIGHT } else { i::CHEVRON_DOWN }, theme::icon_font(11.0), p.muted);
+						painter.circle_filled(c + Vec2::new(22.0, 0.0), 3.5, *color);
+						let mut job = egui::text::LayoutJob::simple_singleline(key.replace('/', " › ").to_uppercase(), theme::semibold(10.5), p.text2);
+						job.wrap = egui::text::TextWrapping::truncate_at_width((width - 70.0).max(20.0));
+						let label = painter.layout_job(job);
+						painter.galley(c + Vec2::new(32.0, -label.size().y / 2.0), label, p.text2);
+						painter.text(rect.right_center() - Vec2::new(6.0, 0.0), egui::Align2::RIGHT_CENTER, count.to_string(), egui::FontId::proportional(11.0), p.muted);
+						painter.line_segment([rect.left_bottom() + Vec2::new(0.0, -1.0), rect.right_bottom() + Vec2::new(0.0, -1.0)], Stroke::new(1.0, p.border));
+						if resp.clicked() {
+							toggle = Some(key.clone());
+						}
+						continue;
+					}
+					Row::Page(pg) => *pg,
+				};
 				let (w, h) = doc.page_size(page);
 				let th = thumb_w * (h / w) as f32;
-				ui.vertical_centered(|ui| {
+				ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
 					let (rect, resp) = ui.allocate_exact_size(Vec2::new(thumb_w, th), Sense::click_and_drag());
 					let current = page == doc.page;
 					let painter = ui.painter();
@@ -168,8 +258,8 @@ impl LeftPanel {
 							doc.go_to_page(page);
 						}
 					}
-					// Drag a thumbnail onto another to move the page.
-					if resp.drag_stopped() {
+					// Drag a thumbnail onto another to move the page (in the plain list only).
+					if resp.drag_stopped() && !filtered && !grouped {
 						if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
 							let rel = ((pos.y - rect.top()) / row_h).round() as i64;
 							let to = (page as i64 + rel).clamp(1, n as i64) as u32;
@@ -197,12 +287,22 @@ impl LeftPanel {
 						}
 					});
 					let label = doc.page_label(page);
-					let text = if label.starts_with("Page ") { format!("{page}") } else { format!("{page} · {label}") };
-					ui.label(RichText::new(text).size(11.5).color(if current { p.text } else { p.text2 }).font(if current { theme::semibold(11.5) } else { theme::medium(11.5) }));
+					let text = match doc.sheet_name(page) {
+						Some(name) => format!("{page} · {name}"),
+						None if label.starts_with("Page ") => format!("{page}"),
+						None => format!("{page} · {label}"),
+					};
+					// One line, so every row keeps the height the list was laid out with.
+					ui.add(egui::Label::new(RichText::new(text).size(11.5).color(if current { p.text } else { p.text2 }).font(if current { theme::semibold(11.5) } else { theme::medium(11.5) })).truncate());
 					ui.add_space(6.0);
 				});
 			}
 		});
+		if let Some(k) = toggle {
+			if !self.folded.remove(&k) {
+				self.folded.insert(k);
+			}
+		}
 		action
 	}
 

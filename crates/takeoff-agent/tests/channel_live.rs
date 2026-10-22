@@ -210,3 +210,82 @@ fn opens_a_terminal_that_runs_the_command() {
 	assert!(marker.exists(), "the terminal ran the command");
 	std::fs::remove_file(marker).ok();
 }
+
+/// A sheet: its title-block text, texts (text, x, y, size) and rectangles, in pt.
+type SheetSpec<'a> = (&'a str, &'a [(&'a str, f32, f32, f32)], &'a [(f32, f32, f32, f32)]);
+
+/// A small set with real sheet text: plan, details, framing, notes.
+fn set_fixture() -> std::path::PathBuf {
+	let pdfium = takeoff_pdf::pdfium().unwrap();
+	let mut doc = pdfium.create_new_pdf().unwrap();
+	let font = doc.fonts_mut().helvetica_bold();
+	let sheets: [SheetSpec; 4] = [
+		(
+			"A-101  FIRST FLOOR PLAN",
+			&[("1  FIRST FLOOR PLAN  1/8\" = 1'-0\"", 60.0, 560.0, 12.0), ("3/A-501", 330.0, 300.0, 10.0), ("A/A-501", 470.0, 200.0, 10.0), ("SEE S-201 FOR FRAMING", 80.0, 120.0, 9.0), ("STAIR 1", 300.0, 340.0, 9.0), ("NOTE 4: ALL GWB 5/8\" TYPE X, SEE A-601", 80.0, 100.0, 9.0)],
+			&[(60.0, 90.0, 520.0, 450.0), (320.0, 290.0, 40.0, 25.0), (460.0, 190.0, 40.0, 25.0)],
+		),
+		("A-501  DETAILS", &[("1  TREAD NOSING", 60.0, 330.0, 11.0), ("3  HANDRAIL BRACKET", 330.0, 330.0, 11.0), ("A  WALL SECTION", 60.0, 60.0, 11.0)], &[(60.0, 350.0, 240.0, 200.0), (330.0, 350.0, 240.0, 200.0), (60.0, 80.0, 240.0, 220.0)]),
+		("S-201  SECOND FLOOR FRAMING PLAN", &[("1  FRAMING PLAN", 60.0, 560.0, 12.0), ("W12x26 TYP.", 200.0, 300.0, 9.0)], &[(60.0, 90.0, 520.0, 450.0)]),
+		("A-601  GENERAL NOTES AND DOOR SCHEDULE", &[("GENERAL NOTES", 60.0, 560.0, 12.0), ("4. ALL GYPSUM BOARD 5/8\" TYPE X UNLESS NOTED.", 60.0, 530.0, 9.0), ("DOOR SCHEDULE", 330.0, 560.0, 12.0), ("101  3'-0\" x 7'-0\"  HM", 330.0, 530.0, 9.0)], &[(320.0, 400.0, 260.0, 180.0)]),
+	];
+	for (title, texts, rects) in sheets {
+		let mut page = doc.pages_mut().create_page_at_end(PdfPagePaperSize::Custom(PdfPoints::new(792.0), PdfPoints::new(612.0))).unwrap();
+		// Title block on the right edge.
+		page.objects_mut().create_path_object_rect(PdfRect::new_from_values(20.0, 620.0, 592.0, 772.0), Some(PdfColor::new(0, 0, 0, 255)), Some(PdfPoints::new(1.0)), None).unwrap();
+		page.objects_mut().create_text_object(PdfPoints::new(630.0), PdfPoints::new(60.0), title, font, PdfPoints::new(9.0)).unwrap();
+		for (x, y, w, h) in rects {
+			page.objects_mut().create_path_object_rect(PdfRect::new_from_values(*y, *x, y + h, x + w), Some(PdfColor::new(0, 0, 0, 255)), Some(PdfPoints::new(1.0)), None).unwrap();
+		}
+		for (t, x, y, size) in texts {
+			page.objects_mut().create_text_object(PdfPoints::new(*x), PdfPoints::new(*y), t, font, PdfPoints::new(*size)).unwrap();
+		}
+	}
+	let path = std::env::temp_dir().join(format!("takeoff-live-set-{}.pdf", std::process::id()));
+	doc.save_to_file(&path).unwrap();
+	let _ = takeoff_core::docmap::delete(&path);
+	path
+}
+
+/// The whole mapping path: the CLI surveys, hands sheets to its own
+/// subagents (which use the drawing tools over MCP), and the map is written.
+#[test]
+#[ignore]
+fn maps_a_small_set_through_the_cli() {
+	let ch = Channel::ClaudeCode;
+	assert!(std::env::var_os("TAKEOFF_BRIDGE_EXE").is_some(), "set TAKEOFF_BRIDGE_EXE to a built takeoff-desk");
+	let pdf = set_fixture();
+	let doc = Arc::new(Mutex::new(Document::new(TakeoffData::default(), vec![(792.0, 612.0); 4], "AI")));
+	let host = ToolHost::start(doc.clone(), pdf.clone()).unwrap();
+	let session = Arc::new(Mutex::new(ChatSession::new()));
+	let model = std::env::var("TAKEOFF_LIVE_MODEL").unwrap_or_else(|_| "sonnet".into());
+	let turn = ChannelTurn { exe: channel::find_exe(ch).expect("CLI installed"), model, ..live_turn(&ch) };
+	let h = channel::start_turn(&host, session, turn, "Map this drawing set: build the document map.\n\nTo test parallel mapping, hand the sheets to two subagents after the survey (pages 1-2 and 3-4).".into());
+	let mut tools = vec![];
+	let mut errors = vec![];
+	let started = std::time::Instant::now();
+	loop {
+		match h.events.recv_timeout(Duration::from_secs(1200)).expect("turn timed out") {
+			AgentEvent::TextDelta(t) => print!("{t}"),
+			AgentEvent::ToolStarted { name, .. } => println!("\n→ {name}"),
+			AgentEvent::ToolFinished { name, ok, summary, .. } => {
+				println!("← {name} ok={ok} {}", summary.chars().take(160).collect::<String>());
+				tools.push(name);
+			}
+			AgentEvent::Error(e) => errors.push(e),
+			AgentEvent::Done { steps } => {
+				println!("\n[done: {steps} steps in {:.0}s]", started.elapsed().as_secs_f32());
+				break;
+			}
+			_ => {}
+		}
+	}
+	let map = takeoff_core::docmap::load(&pdf).expect("a map was written");
+	println!("\n{}", serde_json::to_string_pretty(&map).unwrap());
+	assert!(errors.is_empty(), "errors: {errors:?}");
+	assert_eq!(map.sheets.len(), 4, "every page indexed");
+	assert_eq!(map.pages_mapped().len(), 4, "every page mapped");
+	assert_eq!(map.find_sheet("A-501").map(|s| s.page), Some(2));
+	assert!(map.links.iter().any(|l| takeoff_core::docmap::page_of(&l.from) == Some(1) && takeoff_core::docmap::page_of(&l.to) == Some(2)), "the plan's callouts lead to the details: {:?}", map.links);
+	std::fs::remove_file(pdf).ok();
+}

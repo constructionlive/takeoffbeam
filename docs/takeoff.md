@@ -28,6 +28,8 @@ between `12.50 ft` and `12'-6"`.
 |---|---|---|
 | Count | C | Click each symbol. Every click adds a numbered mark. |
 | Length | L | Click points; double-click or Enter to finish; Backspace removes the last point. |
+| Curve | | A length along a smooth curve through the points you click: click a few along the bend (more on a tight one); double-click or Enter to finish. |
+| Trace line | | Click points **on** a drawn line (its start, its end, anywhere it forks): the length runs along that line between them, through dashes and past lines that cross it. |
 | Perimeter | P | Like Length, but closes the loop. |
 | Area | A | Click the corners; double-click or Enter closes it. Shows area and perimeter. |
 | Rectangle area | B | Drag a rectangle. |
@@ -46,6 +48,15 @@ between `12.50 ft` and `12'-6"`.
 
 Hold **Alt** to place a point freely and **Shift** to lock to 0/45/90°. Scanned sheets have no
 vectors, so snapping quietly does nothing there.
+
+**Curves.** *Curve* and *Trace line* measure curved runs (track, roads, curbs, pipe), and the
+*Curve* markup tool draws a curved line. *Trace line* uses the PDF's own line work, and on scans,
+flattened sheets and lines drawn over aerial photos it follows the line's colour in the picture.
+Both points of a span must be on one drawn line: a centreline that isn't drawn (midway between
+two rails) can't be traced. Where no single line joins two points, that span stays straight.
+
+Either way the result is an ordinary length (or markup): the curve is stored as many short
+segments, so its value is right in the Takeoff list, the exports and construction.live.
 
 ## Editing
 

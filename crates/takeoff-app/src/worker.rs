@@ -21,7 +21,11 @@ pub enum Req {
 	/// Sharp render of a region at an exact pixel size.
 	View { page: u32, region: FracRect, px: (u32, u32), generation: u64 },
 	Thumb { page: u32, max_px: u32 },
+	/// A small render of part of a page (graph view cards), named by `key`.
+	Crop { key: String, page: u32, region: FracRect, max_px: u32 },
 	Segments { page: u32 },
+	/// Follow the line drawn from near `a` to near `b` in the page's picture.
+	Trace { page: u32, a: takeoff_core::Point, b: takeoff_core::Point },
 	Search { query: String, match_case: bool, whole_word: bool, generation: u64, from: u32 },
 	SetHidden(HashSet<String>),
 	Reload,
@@ -42,7 +46,9 @@ pub enum Res {
 	Base { page: u32, image: egui::ColorImage },
 	View { page: u32, region: FracRect, generation: u64, image: egui::ColorImage },
 	Thumb { page: u32, image: egui::ColorImage },
+	Crop { key: String, image: egui::ColorImage },
 	Segments { page: u32, segments: Vec<Segment> },
+	Trace { page: u32, a: takeoff_core::Point, b: takeoff_core::Point, run: Option<Vec<takeoff_core::Point>> },
 	Search { generation: u64, hits: Vec<Hit>, done: bool },
 	LayersApplied,
 	Compare { page: u32, image: egui::ColorImage, changed: f32 },
@@ -140,9 +146,9 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 				Req::SetHidden(_) | Req::Reload | Req::Compare { .. } => 0,
 				Req::View { .. } => 1,
 				Req::Base { .. } => 2,
-				Req::Segments { .. } => 3,
+				Req::Segments { .. } | Req::Trace { .. } => 3,
 				Req::Search { .. } => 4,
-				Req::Thumb { .. } => 5,
+				Req::Thumb { .. } | Req::Crop { .. } => 5,
 			})
 			.map(|(i, _)| i)
 			.unwrap();
@@ -187,9 +193,18 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 					send(Res::Thumb { page, image: to_color_image(r.image) });
 				}
 			}
+			Req::Crop { key, page, region, max_px } => {
+				if let Ok(r) = d.render(page, 150.0, region, Some(max_px)) {
+					send(Res::Crop { key, image: to_color_image(r.image) });
+				}
+			}
 			Req::Segments { page } => {
 				let segments = d.segments(page).unwrap_or_default();
 				send(Res::Segments { page, segments });
+			}
+			Req::Trace { page, a, b } => {
+				let run = d.track_raster(page, a, b).ok().flatten();
+				send(Res::Trace { page, a, b, run });
 			}
 			Req::Search { query, match_case, whole_word, generation, from } => {
 				let n = d.page_count();

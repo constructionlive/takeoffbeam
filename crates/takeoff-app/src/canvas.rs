@@ -55,6 +55,13 @@ pub struct Canvas {
 	pub requests: Vec<CanvasRequest>,
 	pub cursor_page: Option<Point>,
 	pub show_badges: bool,
+	/// Mapped callouts are links (click one to go where it points).
+	pub map_links: bool,
+	/// How Length / Area points are joined.
+	pub curve: CurveMode,
+	/// Along-the-line: the path traced through the points placed (and
+	/// whether a span is still being traced in the picture).
+	follow_cache: Option<(Vec<Point>, Vec<Point>, bool)>,
 	/// The last scroll came from a trackpad (pixel deltas), not a mouse wheel.
 	trackpad: bool,
 	/// The person zoomed or panned this frame (stops following the AI).
@@ -84,9 +91,33 @@ impl Default for Canvas {
 			requests: vec![],
 			cursor_page: None,
 			show_badges: true,
+			map_links: true,
+			curve: CurveMode::Straight,
+			follow_cache: None,
 			trackpad: false,
 			user_moved: false,
 			overlay_tex: HashMap::new(),
+		}
+	}
+}
+
+/// How the Length / Area tools join the points clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurveMode {
+	#[default]
+	Straight,
+	/// A smooth curve through the points.
+	Smooth,
+	/// Along the drawing's own line between each pair of points.
+	Follow,
+}
+
+impl CurveMode {
+	pub fn label(self) -> &'static str {
+		match self {
+			CurveMode::Straight => "Straight lines",
+			CurveMode::Smooth => "Smooth curve",
+			CurveMode::Follow => "Along the drawn line",
 		}
 	}
 }
@@ -198,7 +229,9 @@ impl Canvas {
 		self.page_spinner(ui, doc, p);
 		self.paint_items(&painter, doc, p);
 		self.paint_overlays(&painter, doc, p);
+		self.paint_map(&painter, doc, p);
 		self.interact(ui, &resp, doc, p, snap_on);
+		self.update_follow_cache(doc);
 		self.paint_in_progress(&painter, doc, p);
 		self.text_editor(ui, doc);
 		self.context_menu(&resp, doc);
@@ -481,7 +514,12 @@ impl Canvas {
 					shapes.push(Shape::line(pts.clone(), stroke));
 				}
 			}
-			for v in &pts {
+			// A curve is many short segments: dot only its ends, unless it is being edited.
+			let dense = pts.len() > 12 && !selected;
+			for (k, v) in pts.iter().enumerate() {
+				if dense && k != 0 && k + 1 != pts.len() {
+					continue;
+				}
 				shapes.push(Shape::circle_filled(*v, if selected { 4.0 } else { 2.5 }, color));
 			}
 			if selected {
@@ -590,17 +628,103 @@ impl Canvas {
 		}
 	}
 
+	/// The document map on the sheet: mapped callouts as links, the area
+	/// under the pointer with where it leads, the area the Map tab shows,
+	/// and the one just arrived at.
+	fn paint_map(&self, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
+		let Some(map) = &doc.map else { return };
+		let Some(sheet) = map.sheet(doc.page) else { return };
+		let to_rect = |r: docmap::Region| Rect::from_two_pos(doc.to_screen(Point { x: r.x, y: r.y }), doc.to_screen(Point { x: r.x + r.w, y: r.y + r.h }));
+		let hover = painter.ctx().input(|i| i.pointer.hover_pos()).filter(|h| doc.canvas_rect.contains(*h));
+		let linking = self.map_links && self.tool == Tool::Select;
+		if linking {
+			for part in sheet.parts.iter().filter(|x| x.kind == docmap::PartKind::Callout) {
+				let Some(r) = part.region else { continue };
+				let Some(l) = map.links.iter().find(|l| l.from == part.id) else { continue };
+				let c = crate::graph_view::link_color(l.kind);
+				let rect = to_rect(r).expand(3.0);
+				painter.rect_filled(rect, 4.0, with_alpha(c, 0.12));
+				painter.rect_stroke(rect, 4.0, Stroke::new(1.5, with_alpha(c, 0.75)), StrokeKind::Outside);
+			}
+		}
+		// The area the Map tab shows (picked on the sheet), outlined quietly.
+		if let Some(f) = doc.nav.focus.as_ref().filter(|f| f.contains('.')) {
+			if let Some(r) = map.node(f).filter(|n| n.page() == doc.page).and_then(|n| n.region()) {
+				painter.rect_stroke(to_rect(r).expand(2.0), 4.0, Stroke::new(1.5, with_alpha(p.accent, 0.6)), StrokeKind::Outside);
+			}
+		}
+		// Just arrived: the area pulses for a moment.
+		if let Some((id, at)) = &doc.nav.flash {
+			let age = at.elapsed().as_secs_f32();
+			if let Some(r) = map.node(id).filter(|n| n.page() == doc.page && age < 2.4).and_then(|n| n.region()) {
+				let a = (1.0 - age / 2.4).powf(0.7) * (0.6 + 0.4 * (age * 7.0).cos().abs());
+				let rect = to_rect(r).expand(4.0 + 6.0 * (1.0 - age / 2.4));
+				painter.rect_filled(rect, 6.0, with_alpha(p.accent, 0.10 * a));
+				painter.rect_stroke(rect, 6.0, Stroke::new(3.0, with_alpha(p.accent, a)), StrokeKind::Outside);
+				painter.ctx().request_repaint();
+			}
+		}
+		// Under the pointer: what it is and where it leads.
+		let (Some(h), true) = (hover, linking) else { return };
+		if self.drag.is_some() || self.hit(doc, h).is_some() {
+			return;
+		}
+		let Some(id) = doc.map_area_at(doc.to_page(h)) else { return };
+		let Some(docmap::NodeRef::Part(_, part)) = map.node(&id) else { return };
+		let targets: Vec<&docmap::Link> = map.links.iter().filter(|l| l.from == id).collect();
+		let callout = part.kind == docmap::PartKind::Callout;
+		if !callout && targets.is_empty() {
+			return;
+		}
+		if let Some(r) = part.region {
+			painter.rect_stroke(to_rect(r).expand(3.0), 4.0, Stroke::new(2.0, crate::graph_view::kind_color(part.kind)), StrokeKind::Outside);
+		}
+		let mut lines: Vec<String> = targets.iter().take(3).map(|l| format!("→ {}", map.node(&l.to).map(|n| n.title()).unwrap_or_else(|| l.to.clone()))).collect();
+		if targets.len() > 3 {
+			lines.push(format!("+{} more in the Map tab", targets.len() - 3));
+		}
+		let head = if callout && !targets.is_empty() { "Click to go there" } else { "Click for its links" };
+		let text = format!("{}\n{}", lines.join("\n"), head);
+		let g = painter.layout(text.trim_start().to_string(), theme::medium(11.5), p.text, 320.0);
+		let at = h + Vec2::new(14.0, 16.0);
+		let r = Rect::from_min_size(at, g.size() + Vec2::new(14.0, 10.0));
+		let r = r.translate(Vec2::new((doc.canvas_rect.right() - r.right()).min(0.0), (doc.canvas_rect.bottom() - r.bottom()).min(0.0)));
+		painter.rect_filled(r, 5.0, p.panel);
+		painter.rect_stroke(r, 5.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
+		painter.galley(r.min + Vec2::new(7.0, 5.0), g, p.text);
+		if callout && !targets.is_empty() {
+			painter.ctx().set_cursor_icon(CursorIcon::PointingHand);
+		}
+	}
+
 	fn paint_in_progress(&self, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
 		let hover = painter.ctx().input(|i| i.pointer.hover_pos());
 		let cursor = hover.filter(|h| doc.canvas_rect.contains(*h)).map(|h| self.hover_snap.map(|s| doc.to_screen(s.point)).unwrap_or(h));
 		let accent = p.accent;
 		let stroke = Stroke::new(2.0, accent);
 		if !self.points.is_empty() {
-			let mut pts: Vec<Pos2> = self.points.iter().map(|q| doc.to_screen(*q)).collect();
-			if let Some(c) = cursor {
-				pts.push(c);
-			}
 			let closed = matches!(self.tool, Tool::Area | Tool::Volume | Tool::Cutout | Tool::Annot(AnnotationKind::Polygon | AnnotationKind::Cloud));
+			// The run as it will be stored: curved through the cursor, or traced along the line so far.
+			let mut page_pts = self.points.clone();
+			if let Some(c) = cursor {
+				page_pts.push(doc.to_page(c));
+			}
+			let shaped: Vec<Point> = match (self.curve_mode(), self.curves()) {
+				(CurveMode::Smooth, true) => {
+					let (w, h) = doc.page_size(doc.page);
+					takeoff_core::geometry::smooth_path(&page_pts, closed && page_pts.len() >= 3, w, h)
+				}
+				(CurveMode::Follow, true) => {
+					let mut v = self.follow_cache.as_ref().map(|c| c.1.clone()).unwrap_or_else(|| self.points.clone());
+					v.extend(page_pts.last().copied().filter(|_| cursor.is_some()));
+					v
+				}
+				_ => page_pts.clone(),
+			};
+			let mut pts: Vec<Pos2> = shaped.iter().map(|q| doc.to_screen(*q)).collect();
+			if pts.is_empty() {
+				pts = self.points.iter().map(|q| doc.to_screen(*q)).collect();
+			}
 			if closed && pts.len() >= 3 {
 				painter.add(geom::fill_polygon(&pts, &[], with_alpha(accent, 0.12)));
 			}
@@ -609,14 +733,14 @@ impl Canvas {
 			} else {
 				painter.add(Shape::line(pts.clone(), stroke));
 			}
-			for v in &pts[..self.points.len()] {
-				painter.circle(*v, 3.5, Color32::WHITE, Stroke::new(1.5, accent));
+			for q in &self.points {
+				painter.circle(doc.to_screen(*q), 3.5, Color32::WHITE, Stroke::new(1.5, accent));
 			}
-			// Live quantity next to the cursor.
+			// Live quantity next to the cursor (of the run as shaped).
 			if let Some(c) = cursor {
-				let mut all = self.points.clone();
-				all.push(doc.to_page(c));
+				let all = if self.curves() { shaped.clone() } else { page_pts.clone() };
 				if let Some(text) = self.live_quantity(doc, &all) {
+					let text = if self.curves() && self.curve_mode() != CurveMode::Straight { format!("{text} · {}", self.curve_mode().label().to_lowercase()) } else { text };
 					pill(painter, c + Vec2::new(16.0, 18.0), &text, accent, true);
 				}
 			}
@@ -695,7 +819,7 @@ impl Canvas {
 		let d = doc.doc.lock();
 		let (w, h) = doc.page_size(doc.page);
 		let kind = match self.tool {
-			Tool::Length | Tool::Perimeter | Tool::Calibrate => MeasurementType::Length,
+			Tool::Length | Tool::Curve | Tool::Trace | Tool::Perimeter | Tool::Calibrate => MeasurementType::Length,
 			Tool::Area | Tool::Volume | Tool::Cutout => MeasurementType::Area,
 			Tool::Angle => MeasurementType::Angle,
 			_ => return None,
@@ -1118,6 +1242,22 @@ impl Canvas {
 					if !mods.shift && !cmd {
 						doc.selection.clear();
 					}
+					// The map: a callout goes where it points; any other area shows in the Map tab.
+					if self.map_links && !mods.shift && !cmd {
+						match doc.map_area_at(pt) {
+							Some(a) => {
+								let is_callout = doc.map.as_ref().and_then(|m| m.node(&a)).is_some_and(|n| matches!(n, docmap::NodeRef::Part(_, x) if x.kind == docmap::PartKind::Callout));
+								match doc.map_targets(&a).first().cloned() {
+									Some(t) if is_callout => {
+										doc.map_peek(&a);
+										doc.map_go(&t);
+									}
+									_ => doc.map_peek(&a),
+								}
+							}
+							None => doc.nav.focus = None,
+						}
+					}
 				}
 			}
 		}
@@ -1215,11 +1355,92 @@ impl Canvas {
 		}
 	}
 
-	pub fn finish_points(&mut self, doc: &mut OpenDoc) {
-		let pts = std::mem::take(&mut self.points);
-		let page = doc.page;
+	/// Whether the tool draws a run the curve mode applies to.
+	fn curves(&self) -> bool {
+		matches!(self.tool, Tool::Length | Tool::Curve | Tool::Trace | Tool::CurveMarkup | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout)
+	}
+
+	/// How this tool joins its points: the Curve and Trace tools always
+	/// curve; the others as the curve setting says.
+	pub fn curve_mode(&self) -> CurveMode {
 		match self.tool {
-			Tool::Length | Tool::Perimeter if pts.len() >= 2 => {
+			Tool::Curve | Tool::CurveMarkup => CurveMode::Smooth,
+			Tool::Trace => CurveMode::Follow,
+			_ => self.curve,
+		}
+	}
+
+	/// The points joined as the curve mode says (`closed`: back to the
+	/// first), and whether a span is still being traced in the picture.
+	fn shape(&self, doc: &mut OpenDoc, pts: &[Point], closed: bool) -> (Vec<Point>, bool) {
+		let (w, h) = doc.page_size(doc.page);
+		match self.curve_mode() {
+			CurveMode::Straight => (pts.to_vec(), false),
+			CurveMode::Smooth => (takeoff_core::geometry::smooth_path(pts, closed, w, h), false),
+			CurveMode::Follow => {
+				let idx = doc.ensure_snap();
+				let mut spans: Vec<(Point, Point)> = pts.windows(2).map(|p| (p[0], p[1])).collect();
+				if closed && pts.len() > 2 {
+					spans.push((pts[pts.len() - 1], pts[0]));
+				}
+				let mut out: Vec<Point> = Vec::new();
+				let mut pending = false;
+				for (a, b) in spans {
+					// The drawing's vector lines; else the line in the page's picture (scans, photos).
+					let run = match idx.as_ref().filter(|i| !i.is_empty()).and_then(|i| i.track(a, b)) {
+						Some(r) => r,
+						None => match doc.trace_raster(a, b) {
+							Some(Some(r)) => r,
+							Some(None) => vec![a, b],
+							None => {
+								pending = true;
+								vec![a, b]
+							}
+						},
+					};
+					let skip = usize::from(!out.is_empty());
+					out.extend(run.into_iter().skip(skip));
+				}
+				if closed && out.len() > 2 && out.first() == out.last() {
+					out.pop();
+				}
+				(out, pending)
+			}
+		}
+	}
+
+	/// Along-the-line preview: trace the spans placed so far, once each.
+	fn update_follow_cache(&mut self, doc: &mut OpenDoc) {
+		if self.curve_mode() != CurveMode::Follow || !self.curves() {
+			self.follow_cache = None;
+			return;
+		}
+		// The page's line work loads in the background: ask early, and trace once it's here.
+		if doc.ensure_snap().is_none() {
+			self.follow_cache = None;
+			return;
+		}
+		// Traced already, unless a span was still being traced in the picture.
+		if self.points.len() < 2 || self.follow_cache.as_ref().is_some_and(|(k, _, pending)| *k == self.points && !pending) {
+			return;
+		}
+		let pts = self.points.clone();
+		let (path, pending) = self.shape(doc, &pts, false);
+		self.follow_cache = Some((pts, path, pending));
+	}
+
+	pub fn finish_points(&mut self, doc: &mut OpenDoc) {
+		let raw = std::mem::take(&mut self.points);
+		self.follow_cache = None;
+		let page = doc.page;
+		let pts = if self.curves() && raw.len() >= 2 {
+			let closed = matches!(self.tool, Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout);
+			self.shape(doc, &raw, closed).0
+		} else {
+			raw
+		};
+		match self.tool {
+			Tool::Length | Tool::Curve | Tool::Trace | Tool::Perimeter if pts.len() >= 2 => {
 				let cat = self.category_for(doc, CategoryKind::Length);
 				let mut m = Measurement::new(new_id("ms"), page, MeasurementType::Length, pts);
 				m.category_id = Some(cat);
@@ -1254,6 +1475,10 @@ impl Canvas {
 			}
 			Tool::Calibrate if pts.len() == 2 => {
 				self.requests.push(CanvasRequest::Calibrate { page, p1: pts[0], p2: pts[1] });
+			}
+			Tool::CurveMarkup if pts.len() >= 2 => {
+				let ann = self.new_annotation(doc, AnnotationKind::Polyline, pts);
+				doc.doc.lock().edit("Curve", |d| d.annotations.push(ann));
 			}
 			Tool::Annot(kind @ (AnnotationKind::Polyline | AnnotationKind::Polygon | AnnotationKind::Cloud)) => {
 				let min = if kind == AnnotationKind::Polyline { 2 } else { 3 };

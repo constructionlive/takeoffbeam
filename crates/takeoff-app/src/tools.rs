@@ -10,6 +10,10 @@ pub enum Tool {
 	Pan,
 	Count,
 	Length,
+	/// A length along a smooth curve through the points clicked.
+	Curve,
+	/// A length along the drawn line between the points clicked.
+	Trace,
 	Perimeter,
 	Area,
 	RectArea,
@@ -20,6 +24,8 @@ pub enum Tool {
 	Viewport,
 	FollowLine,
 	Annot(AnnotationKind),
+	/// A curved line markup (stored as a polyline along the curve).
+	CurveMarkup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,8 +36,8 @@ pub enum Group {
 }
 
 impl Tool {
-	pub const MEASURE: [Tool; 11] = [Tool::Count, Tool::Length, Tool::Perimeter, Tool::Area, Tool::RectArea, Tool::Volume, Tool::Cutout, Tool::Angle, Tool::FollowLine, Tool::Calibrate, Tool::Viewport];
-	pub const MARKUP: [Tool; 12] = [
+	pub const MEASURE: [Tool; 13] = [Tool::Count, Tool::Length, Tool::Curve, Tool::Trace, Tool::Perimeter, Tool::Area, Tool::RectArea, Tool::Volume, Tool::Cutout, Tool::Angle, Tool::FollowLine, Tool::Calibrate, Tool::Viewport];
+	pub const MARKUP: [Tool; 13] = [
 		Tool::Annot(AnnotationKind::Text),
 		Tool::Annot(AnnotationKind::Callout),
 		Tool::Annot(AnnotationKind::Cloud),
@@ -40,6 +46,7 @@ impl Tool {
 		Tool::Annot(AnnotationKind::Line),
 		Tool::Annot(AnnotationKind::Arrow),
 		Tool::Annot(AnnotationKind::Polyline),
+		Tool::CurveMarkup,
 		Tool::Annot(AnnotationKind::Polygon),
 		Tool::Annot(AnnotationKind::Highlight),
 		Tool::Annot(AnnotationKind::Ink),
@@ -52,6 +59,9 @@ impl Tool {
 			Tool::Pan => "Pan",
 			Tool::Count => "Count",
 			Tool::Length => "Length",
+			Tool::Curve => "Curve",
+			Tool::Trace => "Trace Line",
+			Tool::CurveMarkup => "Curve",
 			Tool::Perimeter => "Perimeter",
 			Tool::Area => "Area",
 			Tool::RectArea => "Rectangle Area",
@@ -71,6 +81,8 @@ impl Tool {
 			Tool::Pan => i::HAND,
 			Tool::Count => i::HASH,
 			Tool::Length => i::RULER,
+			Tool::Curve | Tool::CurveMarkup => i::SPLINE,
+			Tool::Trace => i::ROUTE,
 			Tool::Perimeter => i::WAYPOINTS,
 			Tool::Area => i::PENTAGON,
 			Tool::RectArea => i::SQUARE_DASHED,
@@ -79,7 +91,7 @@ impl Tool {
 			Tool::Angle => i::TRIANGLE_RIGHT,
 			Tool::Calibrate => i::SCALING,
 			Tool::Viewport => i::FRAME,
-			Tool::FollowLine => i::SPLINE,
+			Tool::FollowLine => i::SCAN,
 			Tool::Annot(k) => match k {
 				AnnotationKind::Text => i::TYPE,
 				AnnotationKind::Callout => i::MESSAGE_SQUARE_TEXT,
@@ -99,6 +111,8 @@ impl Tool {
 
 	pub fn shortcut(self) -> Option<char> {
 		Some(match self {
+			// Every letter is taken.
+			Tool::Curve | Tool::Trace | Tool::CurveMarkup => return None,
 			Tool::Select => 'V',
 			Tool::Pan => 'H',
 			Tool::Count => 'C',
@@ -135,6 +149,9 @@ impl Tool {
 			Tool::Pan => "Drag to pan. Tip: hold Space with any tool",
 			Tool::Count => "Click each symbol to count it",
 			Tool::Length | Tool::Perimeter => "Click points · double-click or Enter to finish · Backspace removes a point · Shift = 45°",
+			Tool::Curve => "Click points along the curve (more on a tight bend) · double-click or Enter to finish",
+			Tool::Trace => "Click points ON a drawn line (start, end, where it forks) · it follows the line between them · double-click or Enter to finish",
+			Tool::CurveMarkup => "Click points along the curve · double-click to finish",
 			Tool::Area | Tool::Volume => "Click the corners · double-click or Enter to close",
 			Tool::RectArea => "Drag a rectangle",
 			Tool::Cutout => "Select an area first, then click the hole's corners",
@@ -153,7 +170,7 @@ impl Tool {
 	pub fn category_kind(self) -> Option<CategoryKind> {
 		match self {
 			Tool::Count => Some(CategoryKind::Count),
-			Tool::Length | Tool::Perimeter | Tool::FollowLine => Some(CategoryKind::Length),
+			Tool::Length | Tool::Curve | Tool::Trace | Tool::Perimeter | Tool::FollowLine => Some(CategoryKind::Length),
 			Tool::Area | Tool::RectArea | Tool::Volume => Some(CategoryKind::Area),
 			_ => None,
 		}
@@ -162,7 +179,7 @@ impl Tool {
 	pub fn group(self) -> Group {
 		match self {
 			Tool::Select | Tool::Pan => Group::Navigate,
-			Tool::Annot(_) => Group::Markup,
+			Tool::Annot(_) | Tool::CurveMarkup => Group::Markup,
 			_ => Group::Measure,
 		}
 	}
@@ -171,7 +188,7 @@ impl Tool {
 	pub fn is_multi_point(self) -> bool {
 		matches!(
 			self,
-			Tool::Length | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout | Tool::Angle | Tool::Calibrate
+			Tool::Length | Tool::Curve | Tool::Trace | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout | Tool::Angle | Tool::Calibrate | Tool::CurveMarkup
 				| Tool::Annot(AnnotationKind::Polyline | AnnotationKind::Polygon | AnnotationKind::Cloud)
 		)
 	}
@@ -179,7 +196,7 @@ impl Tool {
 	pub fn snaps(self) -> bool {
 		matches!(
 			self,
-			Tool::Length | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout | Tool::Angle | Tool::Calibrate | Tool::RectArea | Tool::Viewport | Tool::Count
+			Tool::Length | Tool::Curve | Tool::Trace | Tool::CurveMarkup | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout | Tool::Angle | Tool::Calibrate | Tool::RectArea | Tool::Viewport | Tool::Count
 				| Tool::Annot(AnnotationKind::Line | AnnotationKind::Arrow | AnnotationKind::Polyline | AnnotationKind::Polygon)
 		)
 	}

@@ -912,6 +912,9 @@ fn channel_note(channel: Channel, sweeps: bool, workspace: bool) -> String {
 			"Use only those tools: no shell, files or web."
 		}
 	);
+	if channel == Channel::ClaudeCode {
+		s.push_str(" Your Agent tool starts subagents that run in parallel and have the same drawing tools: use it for long jobs such as mapping a set (one subagent per batch of sheets), with a self-contained brief each.");
+	}
 	if !sweeps {
 		s.push_str(" detect, calibrate and trace are not available in this session (they need a construction.live or local vision model selected in Takeoff Desk): find symbols yourself in zoomed views and place them with add_marks, region by region on busy sheets.");
 	}
@@ -1062,18 +1065,19 @@ fn cli_command(turn: &ChannelTurn, bridge: &Bridge, system: &str, resume: Option
 			c.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--input-format", "text"]);
 			c.args(["--system-prompt", system]);
 			c.args(["--mcp-config", &mcp.to_string(), "--strict-mcp-config"]);
+			// Agent: its own subagents, which share the drawing tools (long jobs such as mapping a set).
 			if turn.workspace.is_some() {
 				// Shell and file tools in the workspace (the working directory), pre-approved with the drawing tools.
-				c.args(["--tools", CLAUDE_WORKSPACE_TOOLS]);
-				c.args(["--allowedTools", &format!("mcp__{SERVER},{CLAUDE_WORKSPACE_TOOLS}")]);
+				c.args(["--tools", &format!("{CLAUDE_WORKSPACE_TOOLS},Agent")]);
+				c.args(["--allowedTools", &format!("mcp__{SERVER},{CLAUDE_WORKSPACE_TOOLS},Agent")]);
 			} else if !turn.images.is_empty() {
 				// The drawing tools plus Read, so it can open the attached pictures.
-				c.args(["--tools", "Read"]);
-				c.args(["--allowedTools", &format!("mcp__{SERVER},Read")]);
+				c.args(["--tools", "Read,Agent"]);
+				c.args(["--allowedTools", &format!("mcp__{SERVER},Read,Agent")]);
 			} else {
-				// No built-in tools (shell, files, web): only the drawing tools, pre-approved.
-				c.args(["--tools", ""]);
-				c.args(["--allowedTools", &format!("mcp__{SERVER}")]);
+				// No shell, files or web: only the drawing tools and subagents, pre-approved.
+				c.args(["--tools", "Agent"]);
+				c.args(["--allowedTools", &format!("mcp__{SERVER},Agent")]);
 			}
 			// The folders holding the attached pictures, so Read may open them.
 			let mut dirs: Vec<&Path> = turn.images.iter().filter_map(|im| im.path.parent()).collect();

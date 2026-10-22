@@ -186,6 +186,137 @@ pub fn iou(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> f64 {
 	inter / (a.2 * a.3 + b.2 * b.3 - inter)
 }
 
+/// Whether a traced run from `a` to `b` is believable: it stays near the
+/// straight path between them and isn't much longer. A curve's bend between
+/// two points placed on it is small; a run that wanders off along something
+/// else (photo texture, another line) is not.
+pub fn plausible_trace(run: &[Point], a: Point, b: Point, page_w: f64, page_h: f64) -> bool {
+	let chord = point_distance_px(a, b, page_w, page_h);
+	let len = polyline_length_px(run, page_w, page_h);
+	// A quarter circle between its ends bows out 21% of the span; allow a bit more.
+	let reach = (chord * 0.3).max(12.0);
+	// It must also reach from one to the other: never shorter than the straight line.
+	if len < chord * 0.97 - 2.0 || len > chord * 1.25 + 4.0 || run.iter().any(|p| point_segment_distance_px(*p, a, b, page_w, page_h) > reach) {
+		return false;
+	}
+	// A drawn curve bends steadily; a run picking its way through texture
+	// turns back and forth. Compare the turning along it (every ~6 px) with
+	// how far its heading turns overall.
+	let pts: Vec<(f64, f64)> = resample(run, 6.0, page_w, page_h);
+	if pts.len() < 3 {
+		return true;
+	}
+	let heading = |p: (f64, f64), q: (f64, f64)| (q.1 - p.1).atan2(q.0 - p.0);
+	let wrap = |d: f64| (d + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+	let hs: Vec<f64> = pts.windows(2).map(|w| heading(w[0], w[1])).collect();
+	let turns: Vec<f64> = hs.windows(2).map(|w| wrap(w[1] - w[0])).collect();
+	let total: f64 = turns.iter().map(|t| t.abs()).sum();
+	let net: f64 = turns.iter().sum::<f64>().abs();
+	(total - net).to_degrees() <= 25.0 + len / 40.0
+}
+
+/// Points every `step_px` along a polyline (px coordinates).
+fn resample(run: &[Point], step_px: f64, page_w: f64, page_h: f64) -> Vec<(f64, f64)> {
+	let px: Vec<(f64, f64)> = run.iter().map(|p| (p.x * page_w, p.y * page_h)).collect();
+	let mut out = vec![];
+	let Some(&first) = px.first() else { return out };
+	out.push(first);
+	let mut carry = 0.0;
+	for w in px.windows(2) {
+		let (a, b) = (w[0], w[1]);
+		let l = (b.0 - a.0).hypot(b.1 - a.1);
+		let mut t = step_px - carry;
+		while t <= l {
+			out.push((a.0 + (b.0 - a.0) * t / l, a.1 + (b.1 - a.1) * t / l));
+			t += step_px;
+		}
+		carry = (carry + l) % step_px;
+	}
+	out
+}
+
+/// Douglas–Peucker: drop vertices that sit within `tol_px` of the line
+/// through their neighbours (keeps a dense traced curve light to store and edit).
+pub fn simplify(points: &[Point], tol_px: f64, page_w: f64, page_h: f64) -> Vec<Point> {
+	if points.len() <= 2 {
+		return points.to_vec();
+	}
+	let mut keep = vec![false; points.len()];
+	keep[0] = true;
+	keep[points.len() - 1] = true;
+	let mut stack = vec![(0usize, points.len() - 1)];
+	while let Some((a, b)) = stack.pop() {
+		let (mut far, mut at) = (0.0, a);
+		for k in a + 1..b {
+			let d = point_segment_distance_px(points[k], points[a], points[b], page_w, page_h);
+			if d > far {
+				far = d;
+				at = k;
+			}
+		}
+		if far > tol_px {
+			keep[at] = true;
+			stack.push((a, at));
+			stack.push((at, b));
+		}
+	}
+	points.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+}
+
+/// A smooth curve through `points` (centripetal Catmull–Rom, which never
+/// loops or overshoots between close points), as a dense polyline: every
+/// given point stays on it. `closed` joins the last point back to the first.
+pub fn smooth_path(points: &[Point], closed: bool, page_w: f64, page_h: f64) -> Vec<Point> {
+	let n = points.len();
+	if n < 3 {
+		return points.to_vec();
+	}
+	let px = |p: Point| (p.x * page_w, p.y * page_h);
+	let get = |i: isize| -> (f64, f64) {
+		if closed {
+			px(points[i.rem_euclid(n as isize) as usize])
+		} else if i < 0 {
+			// Carry the bend on past the ends (the parabola through the last
+			// three points), so a few points on an arc read as one steady curve.
+			let (a, b, c) = (px(points[0]), px(points[1]), px(points[2]));
+			(3.0 * a.0 - 3.0 * b.0 + c.0, 3.0 * a.1 - 3.0 * b.1 + c.1)
+		} else if i as usize >= n {
+			let (a, b, c) = (px(points[n - 1]), px(points[n - 2]), px(points[n - 3]));
+			(3.0 * a.0 - 3.0 * b.0 + c.0, 3.0 * a.1 - 3.0 * b.1 + c.1)
+		} else {
+			px(points[i as usize])
+		}
+	};
+	let spans = if closed { n } else { n - 1 };
+	let mut out = vec![points[0]];
+	for i in 0..spans as isize {
+		let (p0, p1, p2, p3) = (get(i - 1), get(i), get(i + 1), get(i + 2));
+		let knot = |a: (f64, f64), b: (f64, f64)| ((b.0 - a.0).hypot(b.1 - a.1)).sqrt().max(1e-6);
+		let (t1, t2, t3) = (knot(p0, p1), knot(p1, p2), knot(p2, p3));
+		let (t1, t2, t3) = (t1, t1 + t2, t1 + t2 + t3);
+		let chord = (p2.0 - p1.0).hypot(p2.1 - p1.1);
+		let steps = ((chord / 2.0).ceil() as usize).clamp(4, 96);
+		for k in 1..=steps {
+			let t = t1 + (t2 - t1) * k as f64 / steps as f64;
+			let lerp = |a: (f64, f64), b: (f64, f64), ta: f64, tb: f64| {
+				let (wa, wb) = ((tb - t) / (tb - ta), (t - ta) / (tb - ta));
+				(a.0 * wa + b.0 * wb, a.1 * wa + b.1 * wb)
+			};
+			let a1 = lerp(p0, p1, 0.0, t1);
+			let a2 = lerp(p1, p2, t1, t2);
+			let a3 = lerp(p2, p3, t2, t3);
+			let b1 = lerp(a1, a2, 0.0, t2);
+			let b2 = lerp(a2, a3, t1, t3);
+			let c = lerp(b1, b2, t1, t2);
+			out.push(Point { x: c.0 / page_w, y: c.1 / page_h });
+		}
+	}
+	if closed {
+		out.pop();
+	}
+	simplify(&out, 0.15, page_w, page_h)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -237,5 +368,32 @@ mod tests {
 			assert_eq!(unit_key(u), "ft2", "{u}");
 		}
 		assert_eq!(unit_key("EA"), "ea");
+	}
+
+	#[test]
+	fn smooth_paths_pass_through_their_points_and_follow_an_arc() {
+		// Five points on a quarter circle of radius 100 (px = fractions × 1000).
+		let (w, h) = (1000.0, 1000.0);
+		let pts: Vec<Point> = (0..5).map(|k| {
+			let a = k as f64 / 4.0 * std::f64::consts::FRAC_PI_2;
+			Point { x: (200.0 + 100.0 * a.cos()) / w, y: (200.0 + 100.0 * a.sin()) / h }
+		}).collect();
+		let curve = smooth_path(&pts, false, w, h);
+		for p in &pts {
+			assert!(curve.iter().any(|q| point_distance_px(*p, *q, w, h) < 1e-6), "passes through {p:?}");
+		}
+		let arc = 100.0 * std::f64::consts::FRAC_PI_2;
+		let straight = polyline_length_px(&pts, w, h);
+		let smooth = polyline_length_px(&curve, w, h);
+		assert!((smooth - arc).abs() < (straight - arc).abs() / 2.0, "smooth {smooth:.2} vs arc {arc:.2} (straight {straight:.2})");
+		// Every vertex of the curve lies on the circle, within a fraction of a px.
+		for q in &curve {
+			let r = ((q.x * w - 200.0).hypot(q.y * h - 200.0) - 100.0).abs();
+			// A straight chord between these points sags 1.9 px.
+			assert!(r < 1.0, "{r}");
+		}
+		// Simplifying a straight run keeps its ends only.
+		let line: Vec<Point> = (0..10).map(|k| Point { x: k as f64 / 10.0, y: 0.5 }).collect();
+		assert_eq!(simplify(&line, 0.1, w, h).len(), 2);
 	}
 }
