@@ -19,7 +19,7 @@ a local model on your machine, or on cloud models if you sign in to
 
 **Download:**
 - [macOS (Apple silicon)](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-arm64.dmg), signed and notarized
-- [Windows 10/11 (x64)](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-x64-setup.exe)
+- [Windows 10/11 (x64)](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-x64-setup.exe), not code-signed yet (signing is coming): Windows SmartScreen asks first, choose *More info → Run anyway*
 
 These links always point at the newest version.
 
@@ -54,7 +54,7 @@ These links always point at the newest version.
 ## Get it
 
 - **macOS (Apple silicon):** [Takeoff-Desk-arm64.dmg](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-arm64.dmg), signed and notarized by Neuratwin Inc.
-- **Windows 10/11 (x64):** [Takeoff-Desk-x64-setup.exe](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-x64-setup.exe).
+- **Windows 10/11 (x64):** [Takeoff-Desk-x64-setup.exe](https://pub-061018a047d54079b309fb16a26a1ce0.r2.dev/takeoff-desk/latest/Takeoff-Desk-x64-setup.exe). Not code-signed yet; signing is coming in a later release. Until then Windows SmartScreen shows *Windows protected your PC* with an unknown publisher: choose *More info → Run anyway*.
 - **From source:** `scripts/fetch-pdfium.sh && cargo run --release -p takeoff-app`.
 
 See the [docs](docs/README.md):
