@@ -125,13 +125,13 @@ Decided 2026-10-14:
 ## Next
 
 - **Windows and Linux installers.** CI already builds and tests on Linux.
-- [x] **Continuous-scroll page view and two-page spreads.** Done: *View → Page layout* (⌘4–⌘7).
-- **Auto area:** click inside a closed region.
-- **Spaces, markup legends.**
 - **Slip-sheets, more:** match on the AI's title-block reading when a sheet has no text layer;
   carry the document map across; a revision list per sheet (not just the latest) in Compare;
   clean up `plan.pdf.revisions/` files an undone slip-sheet left behind.
 - **Sets, more:** reorder and rename drawings in the Set tab; search, the map and the AI across a
   whole set.
+- **Spaces, next:** split lengths at space boundaries as an option (today a length goes whole
+  to the space holding most of it); spaces in the agent's renders; copying a floor's spaces to
+  the other floors.
+- **Legends, next:** a per-space scope, and a column for a custom field.
 - **"Send to construction.live":** upload the takeoff into a project register.
-- **Opening PDFs from Finder** (Apple Events) as well as drag-drop and the Open dialog.

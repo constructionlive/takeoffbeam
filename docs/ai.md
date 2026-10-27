@@ -99,11 +99,11 @@ reads positions off a numbered **view** (`v3`) and the tools convert them.
 | `map_sheets` / `map_add` / `map_remove` | Build the map: the sheet index, areas (boxed off a view) and links with a note on how they relate |
 | `delegate` | Hand parts of a long job to subagents that run in parallel (the app's own agent; Claude Code uses its own `Agent` tool) |
 | `view` | Render a page or region with markups and badges; registers a view id |
-| `read_items` / `find_items_at` | List items; find which item is at a spot in a view |
+| `read_items` / `find_items_at` | List items (with the space each is in, or only one space's); find which item is at a spot in a view |
 | `add_marks` / `add_measurements` | Count marks; lengths, areas, angles (optionally snapped to lines). `path: follow` runs a length along the drawing's own line between the points (curves, dashes, crossings); `path: smooth` curves through them |
 | `update_items` / `delete_items` | Edit or remove items |
 | `create_category` / `update_category` | Takeoff items |
-| `summary` | Counts and totals per page and item |
+| `summary` | Counts and totals per item, per space and per page |
 | `add_annotation` | Clouds, callouts, text, arrows… |
 | `set_scale` / `set_scale_preset` / `check_scale` / `calibrate` | Scale from a dimension, a printed scale, or automatically; measure-back check |
 | `detect` | Tiled symbol sweep, optionally against a legend crop |

@@ -14,6 +14,7 @@ use crate::widgets;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortBy {
 	Page,
+	Space,
 	Subject,
 	Kind,
 	Quantity,
@@ -35,6 +36,8 @@ pub struct MarkupsList {
 	scope: Scope,
 	only_pending: bool,
 	new_column: String,
+	/// Only rows in this space (or the spaces inside it).
+	space: Option<String>,
 	cache: Option<(u64, Vec<MarkupRow>)>,
 	/// Last row clicked without Shift: where a Shift-click range starts.
 	anchor: Option<String>,
@@ -42,7 +45,7 @@ pub struct MarkupsList {
 
 impl Default for MarkupsList {
 	fn default() -> Self {
-		Self { filter: String::new(), sort: SortBy::Page, ascending: true, scope: Scope::All, only_pending: false, new_column: String::new(), cache: None, anchor: None }
+		Self { filter: String::new(), sort: SortBy::Page, ascending: true, scope: Scope::All, only_pending: false, new_column: String::new(), space: None, cache: None, anchor: None }
 	}
 }
 
@@ -70,6 +73,23 @@ impl MarkupsList {
 			ui.selectable_value(&mut self.scope, Scope::All, "All pages");
 			ui.selectable_value(&mut self.scope, Scope::ThisPage, "This page");
 			ui.toggle_value(&mut self.only_pending, format!("{} To review", i::SPARKLES));
+			let spaces: Vec<(String, String, usize)> = {
+				let d = doc.doc.lock();
+				let sp = takeoff_core::spaces::Spaces::new(&d.data);
+				sp.tree().into_iter().map(|(s, depth)| (s.id.clone(), s.name.clone(), depth)).collect()
+			};
+			if self.space.as_ref().is_some_and(|f| !spaces.iter().any(|s| &s.0 == f)) {
+				self.space = None;
+			}
+			if !spaces.is_empty() {
+				let current = self.space.as_ref().and_then(|f| spaces.iter().find(|s| &s.0 == f)).map(|s| s.1.clone()).unwrap_or_else(|| "All spaces".into());
+				egui::ComboBox::from_id_salt("list-space").selected_text(current).width(130.0).show_ui(ui, |ui| {
+					ui.selectable_value(&mut self.space, None, "All spaces");
+					for (id, name, depth) in &spaces {
+						ui.selectable_value(&mut self.space, Some(id.clone()), format!("{}{name}", "   ".repeat(*depth)));
+					}
+				});
+			}
 			ui.add_space(12.0);
 			{
 				if ui.button(format!("{}  Summary CSV", i::SIGMA)).clicked() {
@@ -105,15 +125,22 @@ impl MarkupsList {
 		});
 
 		let needle = self.filter.to_lowercase();
+		let in_space: Option<std::collections::HashSet<String>> = self.space.as_ref().map(|f| {
+			let d = doc.doc.lock();
+			let sp = takeoff_core::spaces::Spaces::new(&d.data);
+			d.data.spaces.iter().filter(|s| sp.is_within(Some(&s.id), f)).map(|s| s.id.clone()).collect()
+		});
 		let mut shown: Vec<MarkupRow> = all
 			.into_iter()
 			.filter(|r| self.scope == Scope::All || r.page == doc.page)
+			.filter(|r| in_space.as_ref().is_none_or(|set| r.space_id.as_ref().is_some_and(|s| set.contains(s))))
 			.filter(|r| !self.only_pending || r.status == "Pending")
-			.filter(|r| needle.is_empty() || [&r.subject, &r.label, &r.note, &r.author, &r.status, &r.quantity].iter().any(|s| s.to_lowercase().contains(&needle)) || r.fields.values().any(|v| v.to_lowercase().contains(&needle)))
+			.filter(|r| needle.is_empty() || [&r.subject, &r.label, &r.note, &r.author, &r.status, &r.quantity, &r.space].iter().any(|s| s.to_lowercase().contains(&needle)) || r.fields.values().any(|v| v.to_lowercase().contains(&needle)))
 			.collect();
 		let key = |r: &MarkupRow| -> (String, f64) {
 			match self.sort {
 				SortBy::Page => (format!("{:06}{}{:06}", r.page, r.subject, r.number.unwrap_or(0)), 0.0),
+				SortBy::Space => (format!("{}\u{0}{:06}{}{:06}", r.space, r.page, r.subject, r.number.unwrap_or(0)), 0.0),
 				SortBy::Subject => (format!("{}{:06}", r.subject, r.number.unwrap_or(0)), 0.0),
 				SortBy::Kind => (format!("{:?}{}", r.kind, r.subject), 0.0),
 				SortBy::Quantity => (String::new(), r.value.unwrap_or(0.0)),
@@ -157,6 +184,7 @@ impl MarkupsList {
 			.sense(egui::Sense::click())
 			.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
 			.column(Column::exact(44.0))
+			.column(Column::initial(130.0).at_least(50.0))
 			.column(Column::initial(90.0).at_least(60.0))
 			.column(Column::initial(170.0).at_least(80.0))
 			.column(Column::exact(36.0))
@@ -173,6 +201,7 @@ impl MarkupsList {
 		table
 			.header(22.0, |mut h| {
 				h.col(|ui| sort_header(ui, "Page", SortBy::Page));
+				h.col(|ui| sort_header(ui, "Space", SortBy::Space));
 				h.col(|ui| sort_header(ui, "Type", SortBy::Kind));
 				h.col(|ui| sort_header(ui, "Subject", SortBy::Subject));
 				h.col(|ui| {
@@ -204,6 +233,9 @@ impl MarkupsList {
 					row.set_selected(selected);
 					row.col(|ui| {
 						ui.label(RichText::new(r.page.to_string()).color(p.text2));
+					});
+					row.col(|ui| {
+						ui.add(egui::Label::new(RichText::new(&r.space).size(12.0)).truncate());
 					});
 					row.col(|ui| {
 						let icon = match r.kind {

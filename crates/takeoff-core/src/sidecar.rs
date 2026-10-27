@@ -51,6 +51,7 @@ pub fn save_to(path: &Path, data: &TakeoffData) -> Result<(), SidecarError> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::model::*;
 
 	#[test]
 	fn path_and_round_trip() {
@@ -101,5 +102,61 @@ mod tests {
 			let _ = crate::numbering::measurement_seq(&d.measurements);
 		}
 		std::fs::remove_dir_all(dir).ok();
+	}
+
+	fn round_trip(d: &TakeoffData, name: &str) -> (TakeoffData, String) {
+		let dir = std::env::temp_dir().join(format!("takeoff-sidecar-{name}-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let pdf = dir.join("x.pdf");
+		save(&pdf, d).unwrap();
+		let text = std::fs::read_to_string(sidecar_path(&pdf)).unwrap();
+		let back = load(&pdf).unwrap();
+		std::fs::remove_dir_all(dir).ok();
+		(back, text)
+	}
+
+	#[test]
+	fn files_without_spaces_or_legends_keep_their_shape() {
+		let mut d = TakeoffData::default();
+		d.categories.push(Category::new("c1", "Duplex", "#4CC2FF", CategoryKind::Count));
+		let (back, text) = round_trip(&d, "plain");
+		assert_eq!(back.categories, d.categories);
+		assert!(back.spaces.is_empty() && back.legends.is_empty());
+		assert!(!text.contains("\"spaces\"") && !text.contains("\"legends\""), "no new keys when unused");
+		// A platform file with neither loads.
+		let platform: TakeoffData = serde_json::from_str(r#"{"version":1,"reviewType":"takeoff","categories":[],"marks":[]}"#).unwrap();
+		assert!(platform.spaces.is_empty() && platform.legends.is_empty());
+	}
+
+	#[test]
+	fn spaces_and_legends_round_trip() {
+		let mut d = TakeoffData::default();
+		let pt = |x, y| Point { x, y };
+		d.spaces.push(Space { id: "sp1".into(), page: 1, name: "Unit 204".into(), color: "#34D399".into(), points: vec![pt(0.1, 0.1), pt(0.4, 0.1), pt(0.4, 0.4)], hidden: true, meta: ItemMeta { author: Some("me".into()), ..Default::default() } });
+		let mut l = Legend::new("lg1", 2, 0.6, 0.7, 0.3, 0.2);
+		l.title = Some("Power".into());
+		l.scope = LegendScope::Document;
+		l.category_ids = vec!["c1".into()];
+		l.columns = LegendColumns { count: true, quantity: false, cost: true };
+		l.markups = true;
+		d.legends.push(l);
+		let (back, text) = round_trip(&d, "new");
+		assert_eq!(back.spaces, d.spaces);
+		assert_eq!(back.legends, d.legends);
+		assert!(text.contains("\"categoryIds\"") && text.contains("\"scope\": \"document\""), "camelCase like the rest");
+	}
+
+	#[test]
+	fn unknown_fields_and_values_are_ignored() {
+		// What an older Takeoff Desk (or construction.live) does with this version's
+		// keys, and what this version does with a newer one's.
+		let json = r##"{"version":1,"reviewType":"takeoff","futureThing":{"a":1},
+			"spaces":[{"id":"sp1","page":1,"name":"Kitchen","color":"#fff","points":[{"x":0,"y":0},{"x":1,"y":0},{"x":1,"y":1}],"futureField":2}],
+			"legends":[{"id":"lg1","page":1,"x":0.1,"y":0.1,"w":0.2,"h":0.2,"scope":"set","columns":{"count":false,"area":true}}]}"##;
+		let d: TakeoffData = serde_json::from_str(json).unwrap();
+		assert_eq!(d.spaces[0].name, "Kitchen");
+		assert_eq!(d.legends[0].scope, LegendScope::Unknown, "a newer scope reads as unknown");
+		assert_eq!(d.legends[0].columns, LegendColumns { count: false, quantity: true, cost: false });
+		assert_eq!(d.legends[0].title(), "Legend");
 	}
 }

@@ -63,6 +63,9 @@ pub struct MarkupRow {
 	pub fields: BTreeMap<String, String>,
 	pub locked: bool,
 	pub hidden: bool,
+	/// The deepest space it is in, and that space's full path ("Level 2 › Unit 204").
+	pub space_id: Option<String>,
+	pub space: String,
 }
 
 const UNGROUPED_COLOR: &str = "#22D3EE";
@@ -73,10 +76,14 @@ pub fn rows(doc: &Document) -> Vec<MarkupRow> {
 	let mark_seq = crate::numbering::mark_seq(&d.marks);
 	let meas_seq = crate::numbering::measurement_seq(&d.measurements);
 	let cat = |id: &Option<String>| id.as_deref().and_then(|i| d.category(i));
+	let spaces = crate::spaces::Spaces::new(d);
+	let names: std::collections::HashMap<&str, String> = d.spaces.iter().map(|s| (s.id.as_str(), spaces.path_name(&s.id))).collect();
+	let space_of = |s: Option<&Space>| (s.map(|s| s.id.clone()), s.and_then(|s| names.get(s.id.as_str()).cloned()).unwrap_or_default());
 	let mut out = Vec::with_capacity(d.marks.len() + d.measurements.len() + d.annotations.len());
 
 	for m in &d.marks {
 		let c = cat(&m.category_id);
+		let (space_id, space) = space_of(spaces.of_mark(m));
 		out.push(MarkupRow {
 			item: ItemRef::Mark(m.id.clone()),
 			kind: RowKind::Count,
@@ -103,12 +110,15 @@ pub fn rows(doc: &Document) -> Vec<MarkupRow> {
 			fields: m.fields.clone().unwrap_or_default(),
 			locked: m.meta.locked,
 			hidden: c.is_some_and(|c| c.hidden),
+			space_id,
+			space,
 		});
 	}
 	// `probe_*` are the agent's transient check shapes, not takeoff items.
 	for m in d.measurements.iter().filter(|m| !m.id.starts_with("probe_")) {
 		let c = cat(&m.category_id);
 		let q = doc.quantity(m);
+		let (space_id, space) = space_of(spaces.of_measurement(m));
 		let kind = match m.kind {
 			MeasurementType::Length if m.closed => RowKind::Perimeter,
 			MeasurementType::Length => RowKind::Length,
@@ -151,10 +161,13 @@ pub fn rows(doc: &Document) -> Vec<MarkupRow> {
 			fields: m.fields.clone().unwrap_or_default(),
 			locked: m.meta.locked,
 			hidden: c.is_some_and(|c| c.hidden),
+			space_id,
+			space,
 		});
 	}
 	for a in &d.annotations {
 		let k = AnnotationKind::ALL.iter().position(|k| *k == a.kind).unwrap_or(0) as u8;
+		let (space_id, space) = space_of(spaces.of_annotation(a));
 		out.push(MarkupRow {
 			item: ItemRef::Annotation(a.id.clone()),
 			kind: RowKind::Annotation(AnnotationKindKey(k)),
@@ -178,6 +191,8 @@ pub fn rows(doc: &Document) -> Vec<MarkupRow> {
 			fields: BTreeMap::new(),
 			locked: a.meta.locked,
 			hidden: false,
+			space_id,
+			space,
 		});
 	}
 	out
@@ -205,6 +220,11 @@ pub struct SummaryLine {
 }
 
 pub fn summary(doc: &Document) -> Vec<SummaryLine> {
+	summary_where(doc, |_, _| true)
+}
+
+/// The summary of only the marks and measurements `keep(id, page)` lets through.
+pub fn summary_where(doc: &Document, keep: impl Fn(&str, u32) -> bool) -> Vec<SummaryLine> {
 	let d = &doc.data;
 	let disp = &d.display;
 	let mut out: Vec<SummaryLine> = Vec::new();
@@ -212,9 +232,9 @@ pub fn summary(doc: &Document) -> Vec<SummaryLine> {
 	keys.push(None);
 	for c in keys {
 		let cid = c.map(|c| c.id.clone());
-		let marks: Vec<&Mark> = d.marks.iter().filter(|m| m.category_id == cid).collect();
+		let marks: Vec<&Mark> = d.marks.iter().filter(|m| m.category_id == cid && keep(&m.id, m.page)).collect();
 		let meas: Vec<&Measurement> =
-			d.measurements.iter().filter(|m| m.category_id == cid && m.kind != MeasurementType::Angle).collect();
+			d.measurements.iter().filter(|m| m.category_id == cid && m.kind != MeasurementType::Angle && keep(&m.id, m.page)).collect();
 		if c.is_none() && marks.is_empty() && meas.is_empty() {
 			continue;
 		}
@@ -293,7 +313,7 @@ impl Cell {
 	}
 }
 
-const ROW_HEADER: [&str; 15] = ["Page", "Type", "Subject", "#", "Label", "Quantity", "Value", "Unit", "Extra", "Author", "Date", "Status", "Layer", "Source", "Note"];
+const ROW_HEADER: [&str; 16] = ["Page", "Space", "Type", "Subject", "#", "Label", "Quantity", "Value", "Unit", "Extra", "Author", "Date", "Status", "Layer", "Source", "Note"];
 const SUMMARY_HEADER: [&str; 9] = ["Item", "Type", "Count", "Quantity", "Unit", "Volume", "Unit cost", "Cost", "Note"];
 
 /// The Markups List as a header and cells, custom columns included: what both exports write.
@@ -306,6 +326,7 @@ fn row_table(doc: &Document, rows: &[MarkupRow]) -> (Vec<String>, Vec<Vec<Cell>>
 		.map(|r| {
 			let mut cells = vec![
 				Cell::Num(r.page as f64),
+				Cell::text(r.space.clone()),
 				Cell::text(r.kind.label()),
 				Cell::text(r.subject.clone()),
 				r.number.map(|n| Cell::Num(n as f64)).unwrap_or(Cell::Empty),
@@ -346,6 +367,41 @@ fn summary_table(lines: &[SummaryLine]) -> (Vec<String>, Vec<Vec<Cell>>) {
 		})
 		.collect();
 	(SUMMARY_HEADER.iter().map(|s| s.to_string()).collect(), body)
+}
+
+/// The summary for one space (or for what is in no space).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpaceSummary {
+	pub space_id: Option<String>,
+	/// Full path, or "No space".
+	pub name: String,
+	pub color: String,
+	pub page: Option<u32>,
+	pub depth: usize,
+	/// Only the items with something in this space.
+	pub lines: Vec<SummaryLine>,
+}
+
+/// The summary per space: every quantity counts once, in its deepest space,
+/// so the groups add up to the whole summary. Spaces in tree order; empty
+/// ones left out; "No space" last.
+pub fn summary_by_space(doc: &Document) -> Vec<SpaceSummary> {
+	let d = &doc.data;
+	let spaces = crate::spaces::Spaces::new(d);
+	let of = spaces.attribute(d);
+	let mut out = Vec::new();
+	let used = |l: &SummaryLine| l.items > 0;
+	for (s, depth) in spaces.tree() {
+		let lines: Vec<SummaryLine> = summary_where(doc, |id, _| of.get(id) == Some(&s.id)).into_iter().filter(used).collect();
+		if !lines.is_empty() {
+			out.push(SpaceSummary { space_id: Some(s.id.clone()), name: spaces.path_name(&s.id), color: s.color.clone(), page: Some(s.page), depth, lines });
+		}
+	}
+	let lines: Vec<SummaryLine> = summary_where(doc, |id, _| !of.contains_key(id)).into_iter().filter(used).collect();
+	if !lines.is_empty() {
+		out.push(SpaceSummary { space_id: None, name: "No space".into(), color: UNGROUPED_COLOR.into(), page: None, depth: 0, lines });
+	}
+	out
 }
 
 fn csv_cell(s: &str) -> String {
@@ -422,12 +478,16 @@ fn xlsx_sheet(wb: &mut rust_xlsxwriter::Workbook, name: &str, (header, body): (V
 	Ok(())
 }
 
-/// Markups List as an Excel workbook: a *Markups* sheet with the CSV's columns and a *Summary*
-/// sheet with the quantity summary's. Pages, numbers, values, counts and costs are numbers.
+/// Markups List as an Excel workbook: a *Markups* sheet with the CSV's columns, a *Summary*
+/// sheet with the quantity summary's, and with spaces a *By space* sheet. Pages, numbers,
+/// values, counts and costs are numbers.
 pub fn rows_xlsx(doc: &Document, rows: &[MarkupRow]) -> Result<Vec<u8>, String> {
 	let mut wb = rust_xlsxwriter::Workbook::new();
 	xlsx_sheet(&mut wb, "Markups", row_table(doc, rows), None)?;
 	xlsx_sheet(&mut wb, "Summary", summary_table(&summary(doc)), Some(("Total", 7)))?;
+	if !doc.data.spaces.is_empty() {
+		xlsx_sheet(&mut wb, "By space", space_summary_table(&summary_by_space(doc)), Some(("Total", 8)))?;
+	}
 	wb.save_to_buffer().map_err(xlsx_err)
 }
 
@@ -436,6 +496,25 @@ pub fn summary_xlsx(lines: &[SummaryLine]) -> Result<Vec<u8>, String> {
 	let mut wb = rust_xlsxwriter::Workbook::new();
 	xlsx_sheet(&mut wb, "Summary", summary_table(lines), Some(("Total", 7)))?;
 	wb.save_to_buffer().map_err(xlsx_err)
+}
+
+/// The summary per space as a table: a Space column, then the summary's columns.
+fn space_summary_table(groups: &[SpaceSummary]) -> (Vec<String>, Vec<Vec<Cell>>) {
+	let (mut header, _) = summary_table(&[]);
+	header.insert(0, "Space".into());
+	let body = groups
+		.iter()
+		.flat_map(|g| summary_table(&g.lines).1.into_iter().map(|mut cells| {
+			cells.insert(0, Cell::text(g.name.clone()));
+			cells
+		}))
+		.collect();
+	(header, body)
+}
+
+/// The summary per space as CSV: a Space column, then the summary's columns.
+pub fn space_summary_csv(groups: &[SpaceSummary]) -> String {
+	table_csv(space_summary_table(groups))
 }
 
 #[cfg(test)]
@@ -514,11 +593,12 @@ mod tests {
 		assert_eq!(header.join(","), csv.lines().next().unwrap());
 		assert_eq!(m.height(), 3);
 		assert_eq!(m.get((1, 0)), Some(&Data::Float(2.0)));
-		assert_eq!(m.get((1, 2)), Some(&Data::String("Duplex, 20A".into())));
-		assert_eq!(m.get((1, 3)), Some(&Data::Float(1.0)));
-		assert_eq!(m.get((2, 3)), Some(&Data::Float(2.0)));
-		assert_eq!(m.get((1, 6)), Some(&Data::Float(1.0)));
-		assert_eq!(m.get((1, 15)), Some(&Data::String("L1-3".into())));
+		assert_eq!(m.get((1, 1)), Some(&Data::Empty), "in no space");
+		assert_eq!(m.get((1, 3)), Some(&Data::String("Duplex, 20A".into())));
+		assert_eq!(m.get((1, 4)), Some(&Data::Float(1.0)));
+		assert_eq!(m.get((2, 4)), Some(&Data::Float(2.0)));
+		assert_eq!(m.get((1, 7)), Some(&Data::Float(1.0)));
+		assert_eq!(m.get((1, 16)), Some(&Data::String("L1-3".into())));
 		let s = wb.worksheet_range("Summary").unwrap();
 		assert_eq!(s.get((1, 2)), Some(&Data::Float(2.0)));
 		assert_eq!(s.get((1, 6)), Some(&Data::Float(12.5)));
@@ -540,5 +620,42 @@ mod tests {
 		assert_eq!(s.get((0, 7)), Some(&Data::String("Cost".into())));
 		assert_eq!(s.get((1, 3)), Some(&Data::Float(2.0)));
 		assert_eq!(s.get((1, 7)), Some(&Data::Empty));
+	}
+
+	#[test]
+	fn spaces_in_rows_csv_and_summary() {
+		let mut data = TakeoffData::default();
+		data.categories.push(Category::new("c1", "Duplex", "#4CC2FF", CategoryKind::Count));
+		let sq = |x0: f64, y0: f64, x1: f64, y1: f64| vec![Point { x: x0, y: y0 }, Point { x: x1, y: y0 }, Point { x: x1, y: y1 }, Point { x: x0, y: y1 }];
+		data.spaces.push(Space { id: "u".into(), page: 1, name: "Unit 204".into(), color: "#34D399".into(), points: sq(0.0, 0.0, 0.5, 0.5), hidden: false, meta: Default::default() });
+		data.spaces.push(Space { id: "k".into(), page: 1, name: "Kitchen".into(), color: "#FBBF24".into(), points: sq(0.0, 0.0, 0.2, 0.2), hidden: true, meta: Default::default() });
+		for (i, x) in [0.1, 0.3, 0.35, 0.8].iter().enumerate() {
+			data.marks.push(Mark { id: format!("m{i}"), category_id: Some("c1".into()), page: 1, x: *x, y: 0.1, w: 0.01, h: 0.01, source: Source::User, status: MarkStatus::Confirmed, tile: None, note: None, fields: None, meta: Default::default() });
+		}
+		let doc = Document::new(data, vec![(1000.0, 1000.0)], "me");
+		let r = rows(&doc);
+		assert_eq!(r[0].space, "Unit 204 › Kitchen", "hidden spaces still count");
+		assert_eq!(r[0].space_id.as_deref(), Some("k"));
+		assert_eq!(r[1].space, "Unit 204");
+		assert_eq!(r[3].space, "");
+		let csv = rows_csv(&doc, &r);
+		assert!(csv.starts_with("Page,Space,Type"));
+		assert!(csv.lines().nth(1).unwrap().starts_with("1,Unit 204 › Kitchen,Count"));
+		let groups = summary_by_space(&doc);
+		let names: Vec<(&str, usize)> = groups.iter().map(|g| (g.name.as_str(), g.lines[0].items)).collect();
+		assert_eq!(names, [("Unit 204", 2), ("Unit 204 › Kitchen", 1), ("No space", 1)]);
+		assert_eq!(groups.iter().map(|g| g.lines[0].items).sum::<usize>(), summary(&doc)[0].items, "groups add up");
+		let csv = space_summary_csv(&groups);
+		assert!(csv.starts_with("Space,Item,"));
+		assert_eq!(csv.lines().count(), 4);
+		use calamine::{Data, Reader, Xlsx};
+		let mut wb: Xlsx<_> = Xlsx::new(std::io::Cursor::new(rows_xlsx(&doc, &r).unwrap())).unwrap();
+		assert_eq!(wb.sheet_names(), vec!["Markups".to_string(), "Summary".to_string(), "By space".to_string()]);
+		let m = wb.worksheet_range("Markups").unwrap();
+		assert_eq!(m.get((1, 1)), Some(&Data::String("Unit 204 › Kitchen".into())));
+		let b = wb.worksheet_range("By space").unwrap();
+		assert_eq!(b.height(), 4);
+		assert_eq!(b.get((1, 0)), Some(&Data::String("Unit 204".into())));
+		assert_eq!(b.get((1, 3)), Some(&Data::Float(2.0)));
 	}
 }

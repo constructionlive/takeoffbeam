@@ -92,9 +92,10 @@ pub fn definitions() -> Vec<ToolDef> {
 			}),
 			&[],
 		),
-		def("read_items", "List takeoff items (200 per call) with ids, badges, categories, status, values.", json!({
+		def("read_items", "List takeoff items (200 per call) with ids, badges, categories, status, values, and the space each is in (its full path, e.g. \"Level 2 › Unit 204 › Kitchen\").", json!({
 			"page": {"type": "integer"}, "category": {"type": "string"},
-			"kind": {"type": "string", "enum": ["mark", "measurement", "annotation"]}, "offset": {"type": "integer"}}), &[]),
+			"kind": {"type": "string", "enum": ["mark", "measurement", "annotation"]},
+			"space": {"type": "string", "description": "Space name or id: only items in it, or in spaces inside it."}, "offset": {"type": "integer"}}), &[]),
 		def("find_items_at", "Which items are at a location (box or point read off a view). Use it before correcting or deleting: correct by LOCATION, never by badge number.", json!({
 			"view": view_id(), "box": bx(), "point": pt()}), &["view"]),
 		def(
@@ -158,8 +159,8 @@ pub fn definitions() -> Vec<ToolDef> {
 		def("update_category", "Rename or restyle a takeoff item, or store where its legend symbol is.", json!({
 			"category": {"type": "string"}, "name": {"type": "string"}, "color": {"type": "string"}, "icon": {"type": "string"},
 			"description": {"type": "string"}, "legend_view": view_id(), "legend_box": bx()}), &["category"]),
-		def("summary", "Totals per item and per page × item (counts, pending vs confirmed, summed lengths/areas), and pages with no scale. Report numbers from here, never by counting yourself.", json!({
-			"page": {"type": "integer"}}), &[]),
+		def("summary", "Totals per item, per space (when the drawing has spaces: named levels, units, rooms) and per page × item (counts, pending vs confirmed, summed lengths/areas), and pages with no scale. Report numbers from here, never by counting yourself.", json!({
+			"page": {"type": "integer"}, "space": {"type": "string", "description": "Space name or id: totals for it and the spaces inside it only."}}), &[]),
 		def("add_annotation", "Add a review markup (not a quantity): text box, callout (box + leader tip point), cloud, rectangle, ellipse, line, arrow, polyline, polygon, highlight. Use for questions and flags to the user.", json!({
 			"view": view_id(), "kind": {"type": "string", "enum": ["text", "callout", "cloud", "rectangle", "ellipse", "line", "arrow", "polyline", "polygon", "highlight"]},
 			"box": bx(), "points": {"type": "array", "items": pt()}, "text": {"type": "string"}, "color": {"type": "string"}}), &["view", "kind"]),

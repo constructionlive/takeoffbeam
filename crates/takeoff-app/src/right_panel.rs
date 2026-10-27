@@ -2,7 +2,6 @@
 //! Properties (the selection, or the defaults for the current markup tool).
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
-use takeoff_core::list::summary;
 use takeoff_core::units::{self, format_quantity, group_thousands, ScalePreset};
 use takeoff_core::*;
 
@@ -20,9 +19,10 @@ pub const SWATCHES: [&str; 12] = ["#E8531A", "#F87171", "#FBBF24", "#A3E635", "#
 pub struct RightPanel {
 	pub tab: usize,
 	renaming: Option<(String, String)>,
+	pub spaces: crate::spaces::SpacesPanel,
 }
 
-fn color_row(ui: &mut egui::Ui, current: &str) -> Option<String> {
+pub(crate) fn color_row(ui: &mut egui::Ui, current: &str) -> Option<String> {
 	let mut picked = None;
 	ui.horizontal_wrapped(|ui| {
 		ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
@@ -51,6 +51,8 @@ impl RightPanel {
 			self.scale_card(ui, doc, canvas, p);
 			ui.add_space(10.0);
 			self.items(ui, doc, canvas, settings, p);
+			self.spaces.ui(ui, doc, canvas, p);
+			crate::legends::panel(ui, doc, canvas, p);
 			self.overlays(ui, doc, p);
 		});
 	}
@@ -184,7 +186,7 @@ impl RightPanel {
 	}
 
 	fn items(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc, canvas: &mut Canvas, settings: &mut Settings, p: &Palette) {
-		let lines = summary(&doc.doc.lock());
+		let lines = crate::spaces::summary_for(&doc.doc.lock(), self.spaces.filter.as_deref());
 		ui.horizontal(|ui| {
 			widgets::section_label(ui, p, "Takeoff items");
 			ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -223,6 +225,7 @@ impl RightPanel {
 				});
 			});
 		});
+		self.spaces.filter_note(ui, doc, p);
 		if lines.is_empty() {
 			widgets::empty_state(ui, p, i::SIGMA, "No quantities yet", "Pick Count, Length or Area and click on the drawing — or ask the AI to count for you.");
 			return;
@@ -492,7 +495,9 @@ impl RightPanel {
 				Some(ItemRef::Measurement(_)) => self.measurement_props(ui, doc, &id, p, canvas),
 				Some(ItemRef::Annotation(_)) => self.annotation_props(ui, doc, &id, p, canvas),
 				None => {
-					doc.selection.clear();
+					if !crate::legends::props(ui, doc, &id, p) && !crate::spaces::props(ui, doc, &id, p) {
+						doc.selection.clear();
+					}
 				}
 			}
 		});

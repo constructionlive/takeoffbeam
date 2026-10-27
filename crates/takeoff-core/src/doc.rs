@@ -203,13 +203,16 @@ impl TakeoffData {
 		}
 	}
 
-	/// Delete items by id (any kind). Locked items are kept. Returns how many went.
+	/// Delete items by id (any kind, spaces and legends too). Locked items are kept. Returns how many went.
 	pub fn delete_ids(&mut self, ids: &HashSet<String>) -> usize {
-		let before = self.marks.len() + self.measurements.len() + self.annotations.len();
+		let count = |d: &Self| d.marks.len() + d.measurements.len() + d.annotations.len() + d.spaces.len() + d.legends.len();
+		let before = count(self);
 		self.marks.retain(|m| !ids.contains(&m.id) || m.meta.locked);
 		self.measurements.retain(|m| !ids.contains(&m.id) || m.meta.locked);
 		self.annotations.retain(|a| !ids.contains(&a.id) || a.meta.locked);
-		before - (self.marks.len() + self.measurements.len() + self.annotations.len())
+		self.spaces.retain(|s| !ids.contains(&s.id) || s.meta.locked);
+		self.legends.retain(|l| !ids.contains(&l.id) || l.meta.locked);
+		before - count(self)
 	}
 
 	/// Move items by (dx, dy) page fractions, clamped to the page. Locked items stay.
@@ -233,6 +236,15 @@ impl TakeoffData {
 			a.points.iter_mut().for_each(mv);
 			a.meta.modified_at = Some(now);
 		}
+		for s in self.spaces.iter_mut().filter(|s| ids.contains(&s.id) && !s.meta.locked) {
+			s.points.iter_mut().for_each(mv);
+			s.meta.modified_at = Some(now);
+		}
+		for l in self.legends.iter_mut().filter(|l| ids.contains(&l.id) && !l.meta.locked) {
+			l.x = (l.x + dx).clamp(0.0, 1.0 - l.w);
+			l.y = (l.y + dy).clamp(0.0, 1.0 - l.h);
+			l.meta.modified_at = Some(now);
+		}
 	}
 
 	/// Copies of items, for the clipboard.
@@ -241,6 +253,8 @@ impl TakeoffData {
 			marks: self.marks.iter().filter(|m| ids.contains(&m.id)).cloned().collect(),
 			measurements: self.measurements.iter().filter(|m| ids.contains(&m.id)).cloned().collect(),
 			annotations: self.annotations.iter().filter(|a| ids.contains(&a.id)).cloned().collect(),
+			spaces: self.spaces.iter().filter(|s| ids.contains(&s.id)).cloned().collect(),
+			legends: self.legends.iter().filter(|l| ids.contains(&l.id)).cloned().collect(),
 		}
 	}
 
@@ -280,6 +294,16 @@ impl TakeoffData {
 			ids.push(id.clone());
 			self.annotations.push(Annotation { id, page, points: a.points.iter().map(shift).collect(), meta: meta.clone(), ..a.clone() });
 		}
+		for s in &clip.spaces {
+			let id = new_id("sp");
+			ids.push(id.clone());
+			self.spaces.push(Space { id, page, points: s.points.iter().map(shift).collect(), meta: meta.clone(), ..s.clone() });
+		}
+		for l in &clip.legends {
+			let id = new_id("lg");
+			ids.push(id.clone());
+			self.legends.push(Legend { id, page, x: (l.x + dx).clamp(0.0, 1.0 - l.w), y: (l.y + dy).clamp(0.0, 1.0 - l.h), meta: meta.clone(), ..l.clone() });
+		}
 		ids
 	}
 }
@@ -289,11 +313,15 @@ pub struct Clipboard {
 	pub marks: Vec<Mark>,
 	pub measurements: Vec<Measurement>,
 	pub annotations: Vec<Annotation>,
+	#[serde(default)]
+	pub spaces: Vec<Space>,
+	#[serde(default)]
+	pub legends: Vec<Legend>,
 }
 
 impl Clipboard {
 	pub fn is_empty(&self) -> bool {
-		self.marks.is_empty() && self.measurements.is_empty() && self.annotations.is_empty()
+		self.marks.is_empty() && self.measurements.is_empty() && self.annotations.is_empty() && self.spaces.is_empty() && self.legends.is_empty()
 	}
 }
 
