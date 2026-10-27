@@ -24,9 +24,13 @@ takeoff models catalog --context 65536
 
 takeoff agent plans.pdf --page 3 --model local:Qwen3.8-27B-Q4_K_M "count the duplex receptacles"
 takeoff agent plans.pdf --base-url http://localhost:1234/v1 --model qwen3-vl-30b "set the scale"
+
+takeoff eval run --base-url http://localhost:1234/v1 --model qwen3-vl-30b     # score the agent on evals/cases
+takeoff eval probe --base-url http://localhost:1234/v1 --model qwen3-vl-30b   # box accuracy per coordinate convention
 ```
 
-Page tools carry the takeoff along, exactly as in the app.
+Page tools carry the takeoff along, exactly as in the app. `takeoff eval` is described in
+[Evals](evals.md).
 
 ## MCP
 

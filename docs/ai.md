@@ -157,6 +157,11 @@ These are measurements from Qwen3.8 27B (Q4_K_M) on an M3 Max with 36 GB.
 - **Not yet verified with a live local model:** full symbol sweeps (`detect`), `trace` and
   `follow_line`. They are covered by tests with a scripted model.
 
+To measure a model yourself, use `takeoff eval probe` (how accurately it places boxes, in each
+convention) and `takeoff eval run` (whole jobs on sheets with known answers). On the synthetic
+sheets, Qwen3.8 27B put 18 of 18 boxes on target in its own convention; Gemma 3 4B put none. See
+[Evals](evals.md).
+
 ## Your own Claude Code or Codex, or OpenCode's free models
 
 If you already pay for Claude or ChatGPT, *Models → Subscriptions* runs the agent on the Claude

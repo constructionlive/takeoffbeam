@@ -10,7 +10,7 @@ takeoff-models   GGUF header reader, memory-fit estimate, model catalog/store/do
                  llama-server supervisor
 takeoff-cloud    construction.live device-code sign-in, keychain token, models, chat base URL
 takeoff-agent    OpenAI-compatible streaming client, the agent loop (with parallel subagents),
-                 drawing tools, the document-map tools, vision pipelines
+                 drawing tools, the document-map tools, vision pipelines, evals + vision probe
 takeoff-app      egui desktop app
 takeoff-cli      `takeoff` CLI and the MCP server
 ```
