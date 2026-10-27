@@ -229,7 +229,11 @@ pub fn score(expect: &[Expect], doc: &Document, page: u32, said: &str) -> Vec<Sc
 					}
 				}
 				let word = if kind == MeasurementType::Length { "length" } else { "area" };
-				let got = if n == 0 && unscaled > 0 { format!("{unscaled} unscaled") } else { format!("{total:.1} {unit}") };
+				let got = match (n, unscaled) {
+					(0, 0) => "nothing matching".into(),
+					(0, u) => format!("{u} unscaled"),
+					_ => format!("{total:.1} {unit}"),
+				};
 				let err = err_pct(total, *value);
 				Score { what: format!("{word} {}", item_label(item)), expected: format!("{value} {unit}"), got, err_pct: err, pass: n > 0 && err.is_some_and(|e| e.abs() <= *tol_pct) }
 			}

@@ -292,11 +292,11 @@ pub fn probe_table(rows: &[ProbeRow]) -> String {
 	}
 	s.push_str("* = the dialect Takeoff Desk uses for this model today\n\n");
 	let vs = verdicts(rows);
-	s.push_str(&format!("{:<24} {:<7} {:>9} {:>9} {:>7}  {}\n", "model", "dialect", "recall", "precision", "err %", "verdict"));
+	s.push_str(&format!("{:<24} {:<7} {:>11} {:>9} {:>7}  {}\n", "model", "dialect", "recall", "precision", "err %", "verdict"));
 	for v in &vs {
 		let pct = |a: usize, b: usize| if b > 0 { format!("{:.0}%", a as f64 / b as f64 * 100.0) } else { "-".into() };
 		s.push_str(&format!(
-			"{:<24} {:<7} {:>9} {:>9} {:>7}  {}{}\n",
+			"{:<24} {:<7} {:>11} {:>9} {:>7}  {}{}\n",
 			short(&v.model, 24),
 			format!("{}{}", v.dialect, if v.native { "*" } else { "" }),
 			format!("{} {}", pct(v.hits, v.targets), format_args!("{}/{}", v.hits, v.targets)),
