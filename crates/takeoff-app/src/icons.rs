@@ -115,3 +115,7 @@ pub const SQUARE_DOT: &str = "\u{e171}";
 pub const LASSO: &str = "\u{e1cd}";
 pub const KEYBOARD: &str = "\u{e283}";
 pub const HISTORY: &str = "\u{e1f4}";
+pub const FILE: &str = "\u{e0c4}";
+pub const GALLERY_VERTICAL: &str = "\u{e4d5}";
+pub const BOOK_OPEN: &str = "\u{e063}";
+pub const LAYOUT_GRID: &str = "\u{e104}";

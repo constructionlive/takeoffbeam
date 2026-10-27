@@ -99,7 +99,8 @@ impl TakeoffApp {
 			return;
 		}
 		match OpenDoc::open(path.clone(), &self.settings.author, ctx) {
-			Ok(d) => {
+			Ok(mut d) => {
+				d.set_layout(self.settings.page_layout);
 				self.docs.push(d);
 				self.active = self.docs.len() - 1;
 				self.settings.push_recent(path);
@@ -364,6 +365,15 @@ impl TakeoffApp {
 		}
 	}
 
+	/// Single page, continuous or spreads, for every open drawing (and remembered).
+	fn set_page_layout(&mut self, l: crate::layout::PageLayout) {
+		self.settings.page_layout = l;
+		self.settings.save();
+		for d in &mut self.docs {
+			d.set_layout(l);
+		}
+	}
+
 	fn toggle_ai(&mut self) {
 		if self.settings.right_panel && self.right.tab == 2 {
 			self.right.tab = 0;
@@ -554,6 +564,19 @@ impl TakeoffApp {
 					d.fit_width();
 				}
 				ui.close();
+			}
+			ui.separator();
+			ui.label(RichText::new("Page layout").color(p.muted).size(11.5));
+			let now = self.settings.page_layout;
+			for (l, icon, label, key) in LAYOUTS {
+				if ui.add(egui::Button::new(format!("{icon}  {label}    {key}")).selected(now.is(l))).clicked() {
+					self.set_page_layout(now.with(l.continuous, l.spreads));
+					ui.close();
+				}
+			}
+			let mut cover = now.cover;
+			if ui.add_enabled(now.spreads, egui::Checkbox::new(&mut cover, "Cover page on its own")).changed() {
+				self.set_page_layout(crate::layout::PageLayout { cover, ..now });
 			}
 			ui.separator();
 			ui.label(RichText::new("Theme").color(p.muted).size(11.5));
@@ -874,6 +897,7 @@ impl TakeoffApp {
 
 	fn status_bar(&mut self, ui: &mut egui::Ui, p: &Palette) {
 		let active = self.active;
+		let mut pick = None;
 		egui::Panel::bottom("status").exact_size(30.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 3)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
 			let Some(d) = self.docs.get_mut(active) else { return };
 			ui.horizontal_centered(|ui| {
@@ -932,12 +956,20 @@ impl TakeoffApp {
 					d.fit_page();
 				}
 				ui.separator();
-				// Scale + cursor position.
-				let (w_pt, h_pt) = d.page_size(d.page);
+				let now = self.settings.page_layout;
+				for (l, icon, label, key) in LAYOUTS {
+					if widgets::icon_button(ui, p, icon, &format!("{label} ({key})"), now.is(l)).clicked() {
+						pick = Some(now.with(l.continuous, l.spreads));
+					}
+				}
+				ui.separator();
+				// Scale + cursor position (on the page under the pointer).
+				let pg = if self.canvas.cursor_page.is_some() { self.canvas.cursor_on } else { d.page };
+				let (w_pt, h_pt) = d.page_size(pg);
 				let (scale, display) = {
 					let doc = d.doc.lock();
 					let at = self.canvas.cursor_page.unwrap_or(Point { x: 0.5, y: 0.5 });
-					(doc.data.scale_at(d.page, at).cloned(), doc.data.display.clone())
+					(doc.data.scale_at(pg, at).cloned(), doc.data.display.clone())
 				};
 				match &scale {
 					Some(s) => {
@@ -981,6 +1013,9 @@ impl TakeoffApp {
 				});
 			});
 		});
+		if let Some(l) = pick {
+			self.set_page_layout(l);
+		}
 	}
 
 	fn start_screen(&mut self, ui: &mut egui::Ui, p: &Palette) {
@@ -1092,6 +1127,12 @@ impl TakeoffApp {
 		}
 		if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::Num0))) {
 			d.fit_page();
+		}
+		// ⌘4–⌘7: single page, continuous, two pages, two pages continuous.
+		if let Some(k) = [Key::Num4, Key::Num5, Key::Num6, Key::Num7].into_iter().position(|k| ctx.input_mut(|i| i.consume_shortcut(&cmd(k)))) {
+			let l = LAYOUTS[k].0;
+			self.set_page_layout(self.settings.page_layout.with(l.continuous, l.spreads));
+			return;
 		}
 		if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::Equals)) || i.consume_shortcut(&cmd(Key::Plus))) {
 			let c = d.canvas_rect.center();
@@ -1530,6 +1571,8 @@ impl TakeoffApp {
 							("⌥← / ⌥→", "Back / forward along the map"),
 							("PgUp / PgDn", "Previous / next page"),
 							("⌘0", "Fit page"),
+							("⌘4 / ⌘5", "Single page / continuous"),
+							("⌘6 / ⌘7", "Two pages / two continuous"),
 						] {
 							ui.label(RichText::new(k).monospace().font(theme::semibold(12.0)).color(p.accent));
 							ui.label(v);
@@ -1884,6 +1927,14 @@ impl TakeoffApp {
 		self.settings.save();
 	}
 }
+
+/// View → Page layout: (mode, icon, name, shortcut).
+const LAYOUTS: [(crate::layout::PageLayout, &str, &str, &str); 4] = [
+	(crate::layout::PageLayout::SINGLE, i::FILE, "Single page", "⌘4"),
+	(crate::layout::PageLayout::CONTINUOUS, i::GALLERY_VERTICAL, "Continuous", "⌘5"),
+	(crate::layout::PageLayout::SPREADS, i::BOOK_OPEN, "Two pages", "⌘6"),
+	(crate::layout::PageLayout::SPREADS_CONTINUOUS, i::LAYOUT_GRID, "Two pages, continuous", "⌘7"),
+];
 
 fn separator(ui: &mut egui::Ui, p: &Palette) {
 	ui.add_space(4.0);

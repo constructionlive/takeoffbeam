@@ -96,6 +96,15 @@ impl Worker {
 		generation
 	}
 
+	/// Sharp renders of several pages at once (continuous, spreads);
+	/// together they supersede any pending.
+	pub fn views(&self, views: Vec<(u32, FracRect, (u32, u32))>) {
+		let generation = self.view_gen.fetch_add(1, Ordering::SeqCst) + 1;
+		for (page, region, px) in views {
+			self.send(Req::View { page, region, px, generation });
+		}
+	}
+
 	pub fn search(&self, query: String, match_case: bool, whole_word: bool) -> u64 {
 		let generation = self.search_gen.fetch_add(1, Ordering::SeqCst) + 1;
 		self.send(Req::Search { query, match_case, whole_word, generation, from: 1 });
