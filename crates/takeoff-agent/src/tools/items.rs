@@ -36,6 +36,15 @@ pub(crate) fn resolve_category(ctx: &ToolCtx, key: &str, kind: CategoryKind, cre
 	Ok(id)
 }
 
+/// A space by id or name (any case).
+fn resolve_space(d: &TakeoffData, key: &str) -> Result<String, String> {
+	if let Some(s) = d.spaces.iter().find(|s| s.id == key || s.name.eq_ignore_ascii_case(key.trim())) {
+		return Ok(s.id.clone());
+	}
+	let names: Vec<String> = d.spaces.iter().map(|s| format!("{} ({}, p{})", s.name, s.id, s.page)).collect();
+	Err(format!("no space '{key}'. Existing: {}", if names.is_empty() { "none".into() } else { names.join(", ") }))
+}
+
 fn changed(ctx: &ToolCtx) {
 	ctx.emit(AgentEvent::DocChanged);
 }
@@ -48,6 +57,8 @@ pub struct ReadItemsArgs {
 	pub category: Option<String>,
 	/// mark | measurement | annotation
 	pub kind: Option<String>,
+	/// Space id or name: only items in it (or in spaces inside it).
+	pub space: Option<String>,
 	pub offset: Option<usize>,
 }
 
@@ -64,22 +75,38 @@ pub fn read_items(ctx: &mut ToolCtx, a: ReadItemsArgs) -> Result<ToolOutput, Str
 	let mseq = mark_seq(&d.marks);
 	let sseq = measurement_seq(&d.measurements);
 	let cname = |c: &Option<String>| c.as_deref().and_then(|id| d.category(id)).map(|c| c.name.as_str()).unwrap_or("ungrouped").to_string();
+	let spaces = takeoff_core::spaces::Spaces::new(d);
+	let within = a.space.as_deref().map(|k| resolve_space(d, k)).transpose()?;
+	let space_ok = |s: Option<&Space>| within.as_deref().is_none_or(|w| spaces.is_within(s.map(|s| s.id.as_str()), w));
+	let path = |s: Option<&Space>| s.map(|s| spaces.path_name(&s.id));
 	let mut rows: Vec<Value> = Vec::new();
 	if kind.is_empty() || kind.starts_with("mark") {
 		for m in d.marks.iter().filter(|m| page_ok(m.page) && cat_ok(&m.category_id)) {
-			rows.push(json!({"id": m.id, "kind": "mark", "badge": mseq.get(&m.id), "category": cname(&m.category_id), "page": m.page,
+			let s = spaces.of_mark(m);
+			if !space_ok(s) {
+				continue;
+			}
+			rows.push(json!({"id": m.id, "kind": "mark", "badge": mseq.get(&m.id), "category": cname(&m.category_id), "page": m.page, "space": path(s),
 				"at": [r3(m.x), r3(m.y), r3(m.w), r3(m.h)], "status": format!("{:?}", m.status).to_lowercase(), "source": format!("{:?}", m.source).to_lowercase(), "note": m.note}));
 		}
 	}
 	if kind.is_empty() || kind.starts_with("measure") {
 		for m in d.measurements.iter().filter(|m| page_ok(m.page) && cat_ok(&m.category_id)) {
-			rows.push(json!({"id": m.id, "kind": format!("{:?}", m.kind).to_lowercase(), "badge": sseq.get(&m.id), "category": cname(&m.category_id), "page": m.page,
+			let s = spaces.of_measurement(m);
+			if !space_ok(s) {
+				continue;
+			}
+			rows.push(json!({"id": m.id, "kind": format!("{:?}", m.kind).to_lowercase(), "badge": sseq.get(&m.id), "category": cname(&m.category_id), "page": m.page, "space": path(s),
 				"points": m.points.len(), "value": m.value.map(r3), "unit": m.unit, "label": m.label, "note": m.note}));
 		}
 	}
 	if kind.is_empty() || kind.starts_with("annot") {
 		for an in d.annotations.iter().filter(|x| page_ok(x.page)) {
-			rows.push(json!({"id": an.id, "kind": an.kind.label(), "page": an.page, "text": an.text}));
+			let s = spaces.of_annotation(an);
+			if !space_ok(s) {
+				continue;
+			}
+			rows.push(json!({"id": an.id, "kind": an.kind.label(), "page": an.page, "space": path(s), "text": an.text}));
 		}
 	}
 	let total = rows.len();
@@ -780,14 +807,26 @@ pub fn update_category(ctx: &mut ToolCtx, a: UpdateCategoryArgs) -> Result<ToolO
 #[derive(Deserialize)]
 pub struct SummaryArgs {
 	pub page: Option<u32>,
+	/// Space id or name: only what is in it (or in spaces inside it).
+	pub space: Option<String>,
 }
 
 pub fn summary(ctx: &mut ToolCtx, a: SummaryArgs) -> Result<ToolOutput, String> {
 	let doc = ctx.doc.lock();
 	let d = &doc.data;
 	let mut out = String::new();
-	let lines = takeoff_core::list::summary(&doc);
-	out.push_str("Takeoff summary (whole drawing):\n");
+	let spaces = takeoff_core::spaces::Spaces::new(d);
+	let of = spaces.attribute(d);
+	let within = a.space.as_deref().map(|k| resolve_space(d, k)).transpose()?;
+	let keep = |id: &str| within.as_deref().is_none_or(|w| spaces.is_within(of.get(id).map(String::as_str), w));
+	let lines: Vec<takeoff_core::list::SummaryLine> = match &within {
+		Some(_) => takeoff_core::list::summary_where(&doc, |id, _| keep(id)).into_iter().filter(|l| l.items > 0).collect(),
+		None => takeoff_core::list::summary(&doc),
+	};
+	match &within {
+		Some(w) => out.push_str(&format!("Takeoff summary (in {}):\n", spaces.path_name(w))),
+		None => out.push_str("Takeoff summary (whole drawing):\n"),
+	}
 	if lines.is_empty() {
 		out.push_str("  nothing taken off yet\n");
 	}
@@ -803,8 +842,16 @@ pub fn summary(ctx: &mut ToolCtx, a: SummaryArgs) -> Result<ToolOutput, String> 
 			l.warning.as_ref().map(|w| format!(" — {w}")).unwrap_or_default()
 		));
 	}
+	// Per space, when there are spaces and no space was asked for.
+	if within.is_none() && !spaces.is_empty() {
+		out.push_str("By space (each quantity once, in the deepest space it is in):\n");
+		for g in takeoff_core::list::summary_by_space(&doc) {
+			let items: Vec<String> = g.lines.iter().map(|l| format!("{} {}", l.name, l.total_text)).collect();
+			out.push_str(&format!("  {}{}: {}\n", g.name, g.page.map(|p| format!(" (p{p})")).unwrap_or_default(), items.join(", ")));
+		}
+	}
 	// Per page × category.
-	let mut pages: Vec<u32> = d.marks.iter().map(|m| m.page).chain(d.measurements.iter().map(|m| m.page)).collect();
+	let mut pages: Vec<u32> = d.marks.iter().filter(|m| keep(&m.id)).map(|m| m.page).chain(d.measurements.iter().filter(|m| keep(&m.id)).map(|m| m.page)).collect();
 	pages.sort_unstable();
 	pages.dedup();
 	if let Some(p) = a.page {
@@ -813,8 +860,8 @@ pub fn summary(ctx: &mut ToolCtx, a: SummaryArgs) -> Result<ToolOutput, String> 
 	for p in &pages {
 		out.push_str(&format!("Page {p}{}:\n", if d.scale_for(*p).is_none() { " (NO SCALE — measurements have no values)" } else { "" }));
 		for c in d.categories.iter().map(|c| Some(c.id.clone())).chain(std::iter::once(None)) {
-			let marks: Vec<&Mark> = d.marks.iter().filter(|m| m.page == *p && m.category_id == c).collect();
-			let meas: Vec<&Measurement> = d.measurements.iter().filter(|m| m.page == *p && m.category_id == c).collect();
+			let marks: Vec<&Mark> = d.marks.iter().filter(|m| m.page == *p && m.category_id == c && keep(&m.id)).collect();
+			let meas: Vec<&Measurement> = d.measurements.iter().filter(|m| m.page == *p && m.category_id == c && keep(&m.id)).collect();
 			if marks.is_empty() && meas.is_empty() {
 				continue;
 			}
