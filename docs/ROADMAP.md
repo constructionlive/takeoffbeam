@@ -122,7 +122,7 @@ Decided 2026-10-14:
 ## Next
 
 - **Windows and Linux installers.** CI already builds and tests on Linux.
-- **Continuous-scroll page view and two-page spreads.**
+- [x] **Continuous-scroll page view and two-page spreads.** Done: *View → Page layout* (⌘4–⌘7).
 - **Auto area:** click inside a closed region.
 - **Spaces, markup legends, sets/slip-sheets.**
 - **"Send to construction.live":** upload the takeoff into a project register.

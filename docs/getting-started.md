@@ -56,6 +56,9 @@ drawing opens in a tab. Your takeoff is saved automatically, about a second afte
   (*Preferences → Mouse wheel* can make it scroll instead). Hold **Space** or drag with the wheel
   button to pan with any tool. **PgUp/PgDn** for pages, **⌘0** to
   fit the page.
+- **Pages one after another:** *View → Page layout* (or the buttons beside the zoom) shows a
+  single page, continuous pages, or two pages side by side (⌘4–⌘7). See
+  [Several pages on screen](takeoff.md#several-pages-on-screen).
 - **Tools:** each has a one-letter shortcut. Press **?** for the full list.
 - **Light or dark:** *View → Theme* (it follows the system by default).
 

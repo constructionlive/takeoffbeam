@@ -29,6 +29,10 @@ takeoff-cli      `takeoff` CLI and the MCP server
 - When the view settles (140 ms), the worker renders the visible region at screen resolution:
   region renders are pixel-exact crops from pdfium (`set_origin` into a region-sized bitmap), so
   zooming a 36×24 sheet never rasterizes the whole sheet at 400%.
+- Continuous view and spreads lay every page out from the page sizes alone (`layout.rs`). Base
+  textures go only to pages on screen and a screen beyond, three at a time, nearest first, sized
+  to the page on screen; far ones are dropped. Each visible page gets its sharp region, sent as
+  one batch that supersedes the last.
 - Overlays (marks, measurements, markups, snap markers, the agent's viewport) are drawn
   with egui in screen space from page fractions. Concave fills use earcut; hatches are
   scanline-clipped.
