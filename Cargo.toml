@@ -39,3 +39,12 @@ takeoff-models = { path = "crates/takeoff-models" }
 collapsible_if = "allow"
 field_reassign_with_default = "allow"
 new_without_default = "allow"
+
+# Pixel work (fill, trace, burn-in, image decoding) is ~10x slower unoptimized,
+# which makes debug runs and the UI tests crawl. Optimize just those crates.
+[profile.dev.package.takeoff-pdf]
+opt-level = 2
+[profile.dev.package.takeoff-core]
+opt-level = 2
+[profile.dev.package."*"]
+opt-level = 2
