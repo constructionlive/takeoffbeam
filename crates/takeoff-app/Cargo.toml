@@ -33,6 +33,7 @@ open = "5"
 
 [dev-dependencies]
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+pdfium-render.workspace = true
 
 [build-dependencies]
 winresource = "0.1"

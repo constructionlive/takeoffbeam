@@ -33,6 +33,10 @@ pub struct CompareState {
 	/// Share of pixels that differ (0–1).
 	pub changed: f32,
 	pub show_overlay: bool,
+	/// Against the page's previous revision (follows to the next revised page).
+	pub revision: bool,
+	/// Items on the parts of the sheet that changed.
+	pub flagged: Vec<String>,
 }
 
 pub struct SearchState {
@@ -175,6 +179,10 @@ pub struct OpenDoc {
 	/// Graph view card images, by key.
 	pub crops: HashMap<String, TextureHandle>,
 	crops_requested: HashSet<String>,
+	/// The PDF file that goes with each undo step (page tools, slip-sheets).
+	pub versions: crate::pdf_undo::PdfVersions,
+	/// Something to tell the user once (the app shows it as a toast).
+	pub notice: Option<(String, bool)>,
 }
 
 impl OpenDoc {
@@ -233,39 +241,34 @@ impl OpenDoc {
 			traced_requested: HashSet::new(),
 			filled: HashMap::new(),
 			fill_seq: 0,
+			versions: Default::default(),
+			notice: None,
 		})
 	}
 
 	fn on_opened(&mut self, o: Opened) {
-		let page_count_changed = o.page_sizes.len() != self.page_sizes.len();
 		self.page_sizes = o.page_sizes.clone();
 		self.labels = o.labels;
 		self.layers = o.layers;
 		self.outline = o.outline;
 		{
+			// Same document, so the undo history survives the PDF being rewritten.
 			let mut d = self.doc.lock();
-			let data = std::mem::take(&mut d.data);
-			let author = d.author.clone();
-			let rev_dirty = d.is_dirty();
-			*d = Document::new(data, o.page_sizes, author);
+			d.set_page_sizes(o.page_sizes);
 			// Keep the layer registry (names) in the takeoff for platform consumers.
 			for name in &self.layers {
 				if !d.data.layers.iter().any(|l| &l.name == name) {
 					d.data.layers.push(takeoff_core::LayerInfo { name: name.clone(), description: None });
 				}
 			}
-			if !rev_dirty {
-				d.mark_saved();
-			}
 		}
 		self.loaded = true;
 		self.page = self.page.clamp(1, self.page_count().max(1));
-		if page_count_changed {
-			self.thumbs.clear();
-			self.thumbs_requested.clear();
-			self.crops.clear();
-			self.crops_requested.clear();
-		}
+		// Pages may show something else now (rotated, replaced), even at the same count.
+		self.thumbs.clear();
+		self.thumbs_requested.clear();
+		self.crops.clear();
+		self.crops_requested.clear();
 		self.base.clear();
 		self.base_requested.clear();
 		self.sharp = None;
@@ -291,6 +294,16 @@ impl OpenDoc {
 	/// Drain worker results; returns true when something changed visually.
 	pub fn poll(&mut self, ctx: &egui::Context) -> bool {
 		let mut changed = false;
+		// Undo/redo across a page edit or slip-sheet: put that step's PDF back.
+		let want = self.doc.lock().data.pdf_state;
+		match self.versions.sync(&self.path, want) {
+			Ok(true) => {
+				self.compare = None;
+				self.reload_pdf();
+			}
+			Ok(false) => {}
+			Err(e) => self.notice = Some((e, true)),
+		}
 		while let Ok(r) = self.worker.rx.try_recv() {
 			changed = true;
 			match r {
@@ -340,11 +353,12 @@ impl OpenDoc {
 					self.crops.clear();
 					self.crops_requested.clear();
 				}
-				Res::Compare { page, image, changed } => {
+				Res::Compare { page, image, changed, grid } => {
 					if let Some(c) = &mut self.compare {
 						if c.page == page {
 							c.tex = Some(ctx.load_texture("compare", image, TextureOptions::LINEAR));
 							c.changed = changed;
+							c.flagged = takeoff_core::slip::items_on_changes(&self.doc.lock().data, page, &grid);
 						}
 					}
 				}
@@ -769,14 +783,33 @@ impl OpenDoc {
 	pub fn start_compare(&mut self, other: PathBuf, other_page: u32, ctx: &egui::Context) {
 		let max_px = 3000.min(ctx.input(|i| i.max_texture_side) as u32);
 		self.worker.send(Req::Compare { page: self.page, other: other.clone(), other_page, max_px });
-		self.compare = Some(CompareState { other, other_page, page: self.page, tex: None, changed: 0.0, show_overlay: true });
+		self.compare = Some(CompareState { other, other_page, page: self.page, tex: None, changed: 0.0, show_overlay: true, revision: false, flagged: vec![] });
 	}
 
-	/// Keep the compare in step with page changes (same page number in both files).
+	/// Compare this page with the revision it replaced; false when it has none (or its file is gone).
+	pub fn compare_previous(&mut self, ctx: &egui::Context) -> bool {
+		let Some(r) = self.doc.lock().data.previous_revision(self.page).cloned() else { return false };
+		let file = takeoff_pdf::slip::history_path(&self.path, &r);
+		if !file.exists() {
+			return false;
+		}
+		self.start_compare(file, r.file_page, ctx);
+		if let Some(c) = &mut self.compare {
+			c.revision = true;
+		}
+		true
+	}
+
+	/// Keep the compare in step with page changes (same page number in both
+	/// files; a revision compare moves to that page's previous revision).
 	pub fn update_compare(&mut self, ctx: &egui::Context) {
 		let needs = self.compare.as_ref().is_some_and(|c| c.page != self.page);
 		if needs {
 			let c = self.compare.take().unwrap();
+			if c.revision {
+				self.compare_previous(ctx);
+				return;
+			}
 			let delta = self.page as i64 - c.page as i64;
 			let other_page = (c.other_page as i64 + delta).max(1) as u32;
 			self.start_compare(c.other, other_page, ctx);

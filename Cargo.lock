@@ -4387,6 +4387,7 @@ dependencies = [
  "image",
  "open",
  "parking_lot",
+ "pdfium-render",
  "reqwest",
  "rfd",
  "serde",
