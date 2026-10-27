@@ -665,9 +665,11 @@ pub fn delete_items(ctx: &mut ToolCtx, a: DeleteArgs) -> Result<ToolOutput, Stri
 	let set: HashSet<String> = a.ids.iter().cloned().collect();
 	let (removed, missing, locked) = {
 		let mut doc = ctx.doc.lock();
-		let missing: Vec<String> = a.ids.iter().filter(|id| doc.data.find(id).is_none()).cloned().collect();
+		// Once each: a model that names a missing id twice must not count it twice.
+		let mut seen = HashSet::new();
+		let missing: Vec<String> = a.ids.iter().filter(|id| doc.data.find(id).is_none() && seen.insert(id.as_str())).cloned().collect();
 		let n = doc.edit(&format!("AI: delete {} item(s)", set.len()), |d| d.delete_ids(&set));
-		let locked = set.len() - missing.len() - n;
+		let locked = set.len().saturating_sub(missing.len() + n);
 		(n, missing, locked)
 	};
 	changed(ctx);
