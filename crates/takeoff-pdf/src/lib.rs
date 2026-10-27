@@ -338,5 +338,5 @@ fn clamp_region(r: FracRect) -> Option<FracRect> {
 	let y0 = r.y.clamp(0.0, 1.0);
 	let x1 = (r.x + r.w).clamp(0.0, 1.0);
 	let y1 = (r.y + r.h).clamp(0.0, 1.0);
-	(x1 > x0 && y1 > y0).then(|| FracRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+	(x1 > x0 && y1 > y0).then_some(FracRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
 }

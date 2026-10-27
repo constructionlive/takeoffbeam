@@ -269,8 +269,8 @@ impl TakeoffApp {
 		egui::Panel::top("tools").frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(8, 4)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
 			ui.horizontal(|ui| {
 				ui.spacing_mut().item_spacing.x = 2.0;
-				let undo = self.doc().map(|d| d.doc.lock().undo_label().map(str::to_string)).flatten();
-				let redo = self.doc().map(|d| d.doc.lock().redo_label().map(str::to_string)).flatten();
+				let undo = self.doc().and_then(|d| d.doc.lock().undo_label().map(str::to_string));
+				let redo = self.doc().and_then(|d| d.doc.lock().redo_label().map(str::to_string));
 				if widgets::icon_button(ui, p, i::UNDO_2, &undo.clone().map(|l| format!("Undo {l} (⌘Z)")).unwrap_or("Nothing to undo".into()), false).clicked() {
 					if let Some(d) = self.doc() {
 						d.doc.lock().undo();
@@ -1853,7 +1853,7 @@ impl TakeoffApp {
 		self.left.tab = tab;
 	}
 	#[doc(hidden)]
-	pub fn debug_session(&mut self, path: &std::path::PathBuf) -> std::sync::Arc<parking_lot::Mutex<takeoff_agent::ChatSession>> {
+	pub fn debug_session(&mut self, path: &std::path::Path) -> std::sync::Arc<parking_lot::Mutex<takeoff_agent::ChatSession>> {
 		self.ai.debug_session(path)
 	}
 
@@ -1914,7 +1914,7 @@ pub fn parse_length(s: &str, default_unit: &str) -> Option<(f64, String)> {
 		let feet: f64 = if ft_part.is_empty() { 0.0 } else { ft_part.parse().ok()? };
 		let inch_str = in_part.trim_end_matches('"').trim();
 		let mut inches = 0.0;
-		for tok in inch_str.split(|c: char| c == ' ' || c == '-').filter(|x| !x.is_empty()) {
+		for tok in inch_str.split([' ', '-']).filter(|x| !x.is_empty()) {
 			if let Some((a, b)) = tok.split_once('/') {
 				inches += a.parse::<f64>().ok()? / b.parse::<f64>().ok()?;
 			} else {

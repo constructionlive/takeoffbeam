@@ -5,7 +5,7 @@
 //! downloads, sign-in, subscriptions, custom endpoint.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -283,11 +283,11 @@ impl AiPanel {
 		self.cloud_models.iter().find(|x| x.id == id).is_none_or(|x| x.vision)
 	}
 
-	fn session(&mut self, path: &PathBuf) -> Arc<Mutex<ChatSession>> {
+	fn session(&mut self, path: &Path) -> Arc<Mutex<ChatSession>> {
 		self.sessions
-			.entry(path.clone())
+			.entry(path.to_path_buf())
 			.or_insert_with(|| {
-				let s = std::fs::read(chat_path(path)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(ChatSession::new);
+				let s = std::fs::read(chat_path(path)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
 				Arc::new(Mutex::new(s))
 			})
 			.clone()
@@ -339,7 +339,7 @@ impl AiPanel {
 	}
 
 	#[doc(hidden)]
-	pub fn debug_session(&mut self, path: &PathBuf) -> Arc<Mutex<ChatSession>> {
+	pub fn debug_session(&mut self, path: &Path) -> Arc<Mutex<ChatSession>> {
 		self.session(path)
 	}
 

@@ -333,7 +333,7 @@ fn intersect(s: &Segment, t: &Segment) -> Option<Point> {
 	}
 	let u = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den;
 	let v = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den;
-	((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)).then(|| Point { x: x1 + u * (x2 - x1), y: y1 + u * (y2 - y1) })
+	((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)).then_some(Point { x: x1 + u * (x2 - x1), y: y1 + u * (y2 - y1) })
 }
 
 /// Fit a rough polyline onto the drawing: each vertex snaps to the nearest

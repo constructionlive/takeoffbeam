@@ -3,6 +3,7 @@
 //! - calibrate: find a printed dimension, pin its two endpoints, set the scale,
 //!   cross-check against a second dimension
 //! - trace: tiled polylines / polygons → measurements
+//!
 //! Every call is an OpenAI-format image chat call to `ctx.llm`, so it runs on
 //! llama-server or a cloud model alike. Coordinates go through the dialect.
 

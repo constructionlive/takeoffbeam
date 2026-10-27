@@ -1,0 +1,4 @@
+# Matches rust-version in Cargo.toml, so clippy only suggests what 1.85 has.
+msrv = "1.85"
+# Long tuple types read fine here.
+type-complexity-threshold = 500

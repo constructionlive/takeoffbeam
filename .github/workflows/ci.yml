@@ -20,7 +20,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: System libraries (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgtk-3-dev libwayland-dev libxcb1-dev libdbus-1-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgtk-3-dev libwayland-dev libxcb1-dev libdbus-1-dev mesa-vulkan-drivers
       - run: scripts/fetch-pdfium.sh
-      - run: cargo test --workspace --exclude takeoff-app
-      - run: cargo build -p takeoff-app
+      # The app tests render the real UI headless through wgpu: Metal on macOS,
+      # WARP on Windows, lavapipe (mesa-vulkan-drivers) on Linux.
+      - run: cargo test --workspace
+
+  clippy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgtk-3-dev libwayland-dev libxcb1-dev libdbus-1-dev
+      - run: cargo clippy --workspace --all-targets -- -D warnings

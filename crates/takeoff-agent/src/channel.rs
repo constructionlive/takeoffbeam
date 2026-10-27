@@ -280,9 +280,7 @@ pub struct ChannelStatus {
 pub fn parse_version(line: &str) -> Option<(u64, u64, u64)> {
 	line.split(|c: char| !(c.is_ascii_digit() || c == '.')).find_map(|w| {
 		let mut it = w.split('.').map(|n| n.parse::<u64>().ok());
-		match (it.next()??, it.next()??, it.next()??) {
-			(a, b, c) => Some((a, b, c)),
-		}
+		Some((it.next()??, it.next()??, it.next()??))
 	})
 }
 

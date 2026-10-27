@@ -85,10 +85,10 @@ fn distance(g: &Grid, from: &Mask) -> Vec<f32> {
 			if y > 0 {
 				v = v.min(d[i - w] + 1.0);
 				if x > 0 {
-					v = v.min(d[i - w - 1] + 1.4142);
+					v = v.min(d[i - w - 1] + std::f32::consts::SQRT_2);
 				}
 				if x + 1 < w {
-					v = v.min(d[i - w + 1] + 1.4142);
+					v = v.min(d[i - w + 1] + std::f32::consts::SQRT_2);
 				}
 			}
 			d[i] = v;
@@ -104,10 +104,10 @@ fn distance(g: &Grid, from: &Mask) -> Vec<f32> {
 			if y + 1 < h {
 				v = v.min(d[i + w] + 1.0);
 				if x + 1 < w {
-					v = v.min(d[i + w + 1] + 1.4142);
+					v = v.min(d[i + w + 1] + std::f32::consts::SQRT_2);
 				}
 				if x > 0 {
-					v = v.min(d[i + w - 1] + 1.4142);
+					v = v.min(d[i + w - 1] + std::f32::consts::SQRT_2);
 				}
 			}
 			d[i] = v;
@@ -183,11 +183,7 @@ fn outline(g: &Grid, m: &Mask) -> Vec<(f64, f64)> {
 			let mut lp = vec![s];
 			let mut cur = s;
 			let mut dir = (0i64, 0i64);
-			loop {
-				let Some(outs) = next.get_mut(&cur) else { break };
-				if outs.is_empty() {
-					break;
-				}
+			while let Some(outs) = next.get_mut(&cur).filter(|o| !o.is_empty()) {
 				// Where two corners touch, turn right so loops stay apart.
 				let k = if outs.len() > 1 {
 					let right = (-dir.1, dir.0);

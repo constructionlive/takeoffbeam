@@ -55,8 +55,8 @@ pub fn read_items(ctx: &mut ToolCtx, a: ReadItemsArgs) -> Result<ToolOutput, Str
 	let doc = ctx.doc.lock();
 	let d = &doc.data;
 	let cat = a.category.as_deref().and_then(|k| d.categories.iter().find(|c| c.id == k || c.name.eq_ignore_ascii_case(k)).map(|c| c.id.clone()));
-	if a.category.is_some() && cat.is_none() {
-		return Err(format!("no category '{}'", a.category.unwrap()));
+	if let (Some(k), None) = (&a.category, &cat) {
+		return Err(format!("no category '{k}'"));
 	}
 	let cat_ok = |c: &Option<String>| cat.as_ref().is_none_or(|w| c.as_ref() == Some(w));
 	let page_ok = |p: u32| a.page.is_none_or(|w| w == p);

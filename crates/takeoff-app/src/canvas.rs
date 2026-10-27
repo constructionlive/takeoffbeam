@@ -528,7 +528,6 @@ impl Canvas {
 			let opacity = cat.and_then(|c| c.opacity).unwrap_or(1.0) as f32;
 			let pts: Vec<Pos2> = m.points.iter().map(to).collect();
 			let selected = sel.contains(&m.id) || flash.contains(&m.id);
-			let pending_ai = m.source == Some(Source::Ai);
 			let width = sw(if selected { 3.0 } else { 2.0 }).max(if selected { 2.5 } else { 1.8 });
 			let stroke = Stroke::new(width, with_alpha(color, opacity.max(0.6)));
 			match m.kind {
@@ -556,7 +555,7 @@ impl Canvas {
 				}
 				MeasurementType::Length => {
 					let dash = cat.and_then(|c| c.line_style);
-					if matches!(dash, Some(LineStyle::Dashed | LineStyle::Dotted)) || pending_ai && false {
+					if matches!(dash, Some(LineStyle::Dashed | LineStyle::Dotted)) {
 						let (a, b) = if dash == Some(LineStyle::Dotted) { (1.5, 4.0) } else { (9.0, 5.0) };
 						geom::dashed(&pts, m.closed, stroke, a, b, &mut shapes);
 					} else if m.closed {

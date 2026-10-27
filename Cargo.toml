@@ -32,3 +32,10 @@ takeoff-cloud = { path = "crates/takeoff-cloud" }
 takeoff-core = { path = "crates/takeoff-core" }
 takeoff-pdf = { path = "crates/takeoff-pdf" }
 takeoff-models = { path = "crates/takeoff-models" }
+
+# Style lints that fight how this code is written; everything else in
+# `cargo clippy -D warnings` (CI) applies.
+[workspace.lints.clippy]
+collapsible_if = "allow"
+field_reassign_with_default = "allow"
+new_without_default = "allow"

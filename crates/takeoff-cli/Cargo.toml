@@ -21,3 +21,6 @@ parking_lot.workspace = true
 base64.workspace = true
 image.workspace = true
 clap = { version = "4.5", features = ["derive", "env"] }
+
+[lints]
+workspace = true

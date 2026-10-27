@@ -55,6 +55,7 @@ pub(crate) fn snap_pair(ctx: &mut ToolCtx, page: u32, p1: Point, p2: Point) -> (
 pub fn set_scale(ctx: &mut ToolCtx, a: SetScaleArgs) -> Result<ToolOutput, String> {
 	let v = ctx.view(&a.view)?;
 	let unit = check_unit(&a.unit)?;
+	#[allow(clippy::neg_cmp_op_on_partial_ord)] // NaN is refused too
 	if !(a.distance > 0.0) {
 		return Err("distance must be positive".into());
 	}
