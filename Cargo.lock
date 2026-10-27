@@ -4490,6 +4490,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "image",
+ "objc2 0.5.3",
  "open",
  "parking_lot",
  "reqwest",
@@ -4501,6 +4502,7 @@ dependencies = [
  "takeoff-core",
  "takeoff-models",
  "takeoff-pdf",
+ "winit",
  "winresource",
 ]
 

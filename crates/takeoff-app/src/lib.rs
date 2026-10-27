@@ -10,6 +10,7 @@ pub mod icons;
 pub mod left_panel;
 pub mod map_panel;
 pub mod markups;
+pub mod open_files;
 pub mod right_panel;
 pub mod settings;
 pub mod theme;

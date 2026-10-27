@@ -15,6 +15,11 @@ takeoff-app      egui desktop app
 takeoff-cli      `takeoff` CLI and the MCP server
 ```
 
+**Opening files.** `main.rs` opens PDFs given as arguments (Windows "Open with", the command
+line). On macOS Finder sends Apple Events instead, which winit drops, so the app builds its own
+event loop and adds `application:openURLs:` to winit's app delegate before running it
+(`open_files.rs`); the paths queue up and the next frame opens them like dropped files.
+
 **Threads in the app.**
 - The UI thread owns the egui state.
 - A render worker thread owns the open `Drawing`, because pdfium is not re-entrant. The UI sends

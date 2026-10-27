@@ -31,6 +31,11 @@ arboard = { version = "3.6", default-features = false, features = ["image-data"]
 earcutr = "0.4"
 open = "5"
 
+# Finder's "open this PDF" Apple Events: our own event loop, so we can hook winit's app delegate.
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = { version = "0.30", default-features = false }
+objc2 = "0.5"
+
 [dev-dependencies]
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
 

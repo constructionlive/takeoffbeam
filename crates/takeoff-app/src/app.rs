@@ -144,8 +144,9 @@ impl TakeoffApp {
 		self.apply_theme(&ctx);
 		let p = theme::palette(&ctx);
 
-		// Dropped files.
-		let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+		// Dropped files, and files Finder sent (double-click, Open With).
+		let mut dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+		dropped.extend(crate::open_files::take());
 		let mut images = Vec::new();
 		for f in dropped {
 			if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {

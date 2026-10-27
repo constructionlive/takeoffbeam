@@ -22,15 +22,28 @@ fn main() -> eframe::Result {
 		viewport = viewport.with_icon(icon);
 	}
 	let options = eframe::NativeOptions { viewport, persist_window: true, ..Default::default() };
-	eframe::run_native(
-		"Takeoff Desk",
-		options,
-		Box::new(move |cc| {
-			let mut app = TakeoffApp::new(&cc.egui_ctx, settings);
-			for f in files {
-				app.open(f, &cc.egui_ctx);
-			}
-			Ok(Box::new(EframeApp(app)))
-		}),
-	)
+	let creator: eframe::AppCreator = Box::new(move |cc| {
+		takeoff_app::open_files::set_context(&cc.egui_ctx);
+		let mut app = TakeoffApp::new(&cc.egui_ctx, settings);
+		for f in files {
+			app.open(f, &cc.egui_ctx);
+		}
+		Ok(Box::new(EframeApp(app)))
+	});
+	run(options, creator)
+}
+
+/// macOS: our own event loop, so Finder's open-file events can be hooked before it runs.
+#[cfg(target_os = "macos")]
+fn run(options: eframe::NativeOptions, creator: eframe::AppCreator) -> eframe::Result {
+	let event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
+	takeoff_app::open_files::install();
+	let mut app = eframe::create_native("Takeoff Desk", options, creator, &event_loop);
+	event_loop.run_app(&mut app)?;
+	Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run(options: eframe::NativeOptions, creator: eframe::AppCreator) -> eframe::Result {
+	eframe::run_native("Takeoff Desk", options, creator)
 }
