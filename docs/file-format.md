@@ -48,6 +48,19 @@ render time.
     "svg": "<svg …>…</svg>",           // or "image": "/abs/path/zones.png"
     "opacity": 0.6, "label": "Pour zones", "hidden": false, "source": "ai"
   }],
+  "spaces": [{                               // named regions quantities belong to
+    "id": "sp_…", "page": 1, "name": "Unit 204", "color": "#34D399",
+    "points": [{ "x": 0.1, "y": 0.1 }, …],    // polygon, implicitly closed
+    "hidden": false, "author": "Ana", "createdAt": 1791993600000
+  }],
+  "legends": [{                              // a legend box on the sheet
+    "id": "lg_…", "page": 1, "x": 0.68, "y": 0.72, "w": 0.28, "h": 0.2,
+    "title": "Electrical",                   // unset = "Legend"
+    "scope": "page",                         // page | document
+    "categoryIds": ["c_…"],                  // only these items; empty = all in scope
+    "columns": { "count": true, "quantity": true, "cost": false },
+    "markups": false                         // also list markups by subject
+  }],
   "customFields": [{ "id": "f_…", "name": "Phase" }],
   "hiddenLayers": ["E-LIGHTING"],
   "layers": [{ "name": "E-LIGHTING", "description": "lighting fixtures and circuits" }],
@@ -64,6 +77,18 @@ render time.
   scales, layers and custom fields.
 - **Badge numbers** are reading order per item: page → rows top to bottom → left to right. They
   are recomputed, never stored.
+- **Spaces** store only their outline. Which space an item is in is worked out from geometry on
+  every change, never stored on the item (see [Spaces](takeoff.md#spaces)), so moving a mark
+  or reshaping a space updates the Space column by itself. Spaces nest by geometry; there is no
+  parent field.
+- **Legends** store only their box and options. Their rows (items, counts, totals) are computed
+  from the takeoff whenever they are drawn.
+- **Adding fields without breaking anyone:** `spaces` and `legends` are left out of the file
+  when empty, so a takeoff without them is byte-for-byte the shape it was before. Every reader
+  ignores keys it doesn't know: older Takeoff Desk versions and construction.live open files
+  with spaces and legends (and drop them if they save), and this version ignores keys added by
+  newer ones. A legend `scope` this version doesn't know is read as `page`; missing `columns`
+  entries take their defaults.
 
 ## Document map
 

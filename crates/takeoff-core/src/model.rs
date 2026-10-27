@@ -488,6 +488,100 @@ impl Viewport {
 	}
 }
 
+/// A named region of a page (Bluebeam "Space"): "Level 2", "Unit 204",
+/// "Kitchen". Quantities inside it are attributed to it; spaces nest by
+/// geometry, and the smallest one around an item wins (see `spaces`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Space {
+	pub id: String,
+	pub page: u32,
+	pub name: String,
+	pub color: String,
+	/// Polygon in page fractions, implicitly closed.
+	pub points: Vec<Point>,
+	/// Hidden on the sheet only; still attributes quantities.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub hidden: bool,
+	#[serde(flatten)]
+	pub meta: ItemMeta,
+}
+
+/// Which items a legend lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LegendScope {
+	/// Items on the legend's own page.
+	#[default]
+	Page,
+	/// Items on every page.
+	Document,
+	/// A scope this version doesn't know: read as the page.
+	#[serde(other)]
+	Unknown,
+}
+
+/// Legend columns besides the swatch and the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegendColumns {
+	#[serde(default = "yes")]
+	pub count: bool,
+	#[serde(default = "yes")]
+	pub quantity: bool,
+	#[serde(default)]
+	pub cost: bool,
+}
+
+fn yes() -> bool {
+	true
+}
+
+impl Default for LegendColumns {
+	fn default() -> Self {
+		Self { count: true, quantity: true, cost: false }
+	}
+}
+
+/// A markup legend on the sheet (Bluebeam "Legend"): a box listing the items
+/// in scope with swatch, name, count and total. Its rows are computed, never
+/// stored (see `legend`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Legend {
+	pub id: String,
+	pub page: u32,
+	/// Top-left + size, page fractions.
+	pub x: f64,
+	pub y: f64,
+	pub w: f64,
+	pub h: f64,
+	/// Unset = "Legend".
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub title: Option<String>,
+	#[serde(default)]
+	pub scope: LegendScope,
+	/// Only these items (category ids); empty = every item in scope.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub category_ids: Vec<String>,
+	#[serde(default)]
+	pub columns: LegendColumns,
+	/// Also list markups (text, clouds…) by subject.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub markups: bool,
+	#[serde(flatten)]
+	pub meta: ItemMeta,
+}
+
+impl Legend {
+	pub fn new(id: impl Into<String>, page: u32, x: f64, y: f64, w: f64, h: f64) -> Self {
+		Self { id: id.into(), page, x, y, w, h, title: None, scope: LegendScope::Page, category_ids: vec![], columns: LegendColumns::default(), markups: false, meta: ItemMeta::default() }
+	}
+	pub fn title(&self) -> &str {
+		self.title.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or("Legend")
+	}
+}
+
 /// How lengths are shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -566,6 +660,10 @@ pub struct TakeoffData {
 	pub viewports: Vec<Viewport>,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub overlays: Vec<Overlay>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub spaces: Vec<Space>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub legends: Vec<Legend>,
 	#[serde(default)]
 	pub display: DisplaySettings,
 }
@@ -587,6 +685,8 @@ impl Default for TakeoffData {
 			annotations: vec![],
 			viewports: vec![],
 			overlays: vec![],
+			spaces: vec![],
+			legends: vec![],
 			display: DisplaySettings::default(),
 		}
 	}

@@ -66,6 +66,21 @@ pub fn normalize(d: &mut TakeoffData) {
 		fix_points(&mut a.points);
 	}
 	d.annotations.retain(|a| a.page >= 1 && !a.points.is_empty() && !a.id.is_empty() && seen.insert(a.id.clone()));
+	for s in &mut d.spaces {
+		fix_points(&mut s.points);
+		if s.name.trim().is_empty() {
+			s.name = "Space".into();
+		}
+	}
+	d.spaces.retain(|s| s.page >= 1 && s.points.len() >= 3 && !s.id.is_empty() && seen.insert(s.id.clone()));
+	d.legends.retain(|l| [l.x, l.y, l.w, l.h].iter().all(|v| v.is_finite()) && l.page >= 1 && !l.id.is_empty() && seen.insert(l.id.clone()));
+	for l in &mut d.legends {
+		l.w = l.w.abs().clamp(0.01, 1.0);
+		l.h = l.h.abs().clamp(0.01, 1.0);
+		l.x = l.x.clamp(0.0, 1.0 - l.w);
+		l.y = l.y.clamp(0.0, 1.0 - l.h);
+		l.category_ids.retain(|c| cats.contains(c));
+	}
 
 	d.page_scales.retain(|s| s.distance.is_finite() && s.distance > 0.0 && s.page >= 1);
 	let mut seen_page = HashSet::new();

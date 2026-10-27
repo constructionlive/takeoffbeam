@@ -10,6 +10,8 @@ pub fn remap_pages(d: &mut TakeoffData, map: impl Fn(u32) -> Option<u32>) {
 	d.marks.retain_mut(|m| map(m.page).map(|p| m.page = p).is_some());
 	d.measurements.retain_mut(|m| map(m.page).map(|p| m.page = p).is_some());
 	d.annotations.retain_mut(|a| map(a.page).map(|p| a.page = p).is_some());
+	d.spaces.retain_mut(|s| map(s.page).map(|p| s.page = p).is_some());
+	d.legends.retain_mut(|l| map(l.page).map(|p| l.page = p).is_some());
 	d.page_scales.retain_mut(|s| map(s.page).map(|p| s.page = p).is_some());
 	d.viewports.retain_mut(|v| {
 		map(v.page)
@@ -87,6 +89,15 @@ pub fn rotate_page_items(d: &mut TakeoffData, page: u32, quarter_turns_cw: u32) 
 	for a in d.annotations.iter_mut().filter(|a| a.page == page) {
 		a.points.iter_mut().for_each(rot);
 	}
+	for s in d.spaces.iter_mut().filter(|s| s.page == page) {
+		s.points.iter_mut().for_each(rot);
+	}
+	for l in d.legends.iter_mut().filter(|l| l.page == page) {
+		// The box turns with the page; its text stays upright.
+		let a = rotate_point(Point { x: l.x, y: l.y }, q);
+		let b = rotate_point(Point { x: l.x + l.w, y: l.y + l.h }, q);
+		(l.x, l.y, l.w, l.h) = (a.x.min(b.x), a.y.min(b.y), (a.x - b.x).abs(), (a.y - b.y).abs());
+	}
 	for s in d.page_scales.iter_mut().filter(|s| s.page == page) {
 		rot(&mut s.p1);
 		rot(&mut s.p2);
@@ -128,6 +139,12 @@ pub fn append_takeoff(d: &mut TakeoffData, other: &TakeoffData, offset: u32) {
 	}
 	for a in &other.annotations {
 		d.annotations.push(Annotation { id: fresh(&a.id, "an"), page: a.page + offset, ..a.clone() });
+	}
+	for s in &other.spaces {
+		d.spaces.push(Space { id: fresh(&s.id, "sp"), page: s.page + offset, ..s.clone() });
+	}
+	for l in &other.legends {
+		d.legends.push(Legend { id: fresh(&l.id, "lg"), page: l.page + offset, category_ids: l.category_ids.iter().filter_map(|c| cat_map.get(c).cloned()).collect(), ..l.clone() });
 	}
 	for s in &other.page_scales {
 		d.page_scales.push(PageScale { page: s.page + offset, ..s.clone() });
