@@ -4462,7 +4462,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-agent"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -4480,7 +4480,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-app"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "arboard",
  "crossbeam-channel",
@@ -4510,7 +4510,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-cli"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -4525,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-cloud"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "dirs",
  "keyring",
@@ -4537,7 +4537,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-core"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "calamine",
  "rust_xlsxwriter",
@@ -4548,7 +4548,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-models"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "dirs",
  "libc",
@@ -4562,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "takeoff-pdf"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "ab_glyph",
  "flate2",
