@@ -10,6 +10,7 @@ use takeoff_core::sidecar;
 use takeoff_pdf::tools::SplitMode;
 use takeoff_pdf::{Drawing, FracRect};
 
+mod evals;
 mod mcp;
 mod serve;
 
@@ -152,6 +153,11 @@ enum Cmd {
 		model: String,
 		#[arg(long, default_value_t = 32768)]
 		context: u32,
+	},
+	/// Score the agent on drawings with known answers, or probe how well a model places boxes.
+	Eval {
+		#[command(subcommand)]
+		cmd: evals::EvalCmd,
 	},
 	/// Serve the drawing tools over MCP (stdio) for Claude Desktop, Cursor, etc.
 	Mcp {
@@ -378,13 +384,15 @@ fn run(cli: Cli) -> Result<(), String> {
 			}
 		},
 		Cmd::Agent { pdf, prompt, page, base_url, api_key, model, context } => agent(pdf, prompt, page, base_url, api_key, model, context)?,
+		Cmd::Eval { cmd } => evals::run(cmd)?,
 		Cmd::Mcp { pdf } => mcp::serve(pdf)?,
 		Cmd::Serve { pdf } => serve::serve(pdf)?,
 	}
 	Ok(())
 }
 
-fn agent(pdf: PathBuf, prompt: String, page: u32, base_url: Option<String>, api_key: Option<String>, model: String, context: u32) -> Result<(), String> {
+/// The endpoint for `model`. "local:<id>" starts llama-server, which runs while the handle lives.
+fn provider(base_url: Option<String>, api_key: Option<String>, model: String, context: u32) -> Result<(takeoff_agent::ProviderConfig, Option<takeoff_models::server::LlamaServer>), String> {
 	let mut _server = None;
 	let provider = if let Some(id) = model.strip_prefix("local:") {
 		let m = takeoff_models::store::installed().into_iter().find(|m| m.id == id).ok_or(format!("no installed model '{id}' (see `takeoff models list`)"))?;
@@ -402,6 +410,11 @@ fn agent(pdf: PathBuf, prompt: String, page: u32, base_url: Option<String>, api_
 		let base = base_url.ok_or("--base-url is required unless --model local:<id>")?;
 		takeoff_agent::ProviderConfig { base_url: base, api_key, model, context_tokens: context, vision: true }
 	};
+	Ok((provider, _server))
+}
+
+fn agent(pdf: PathBuf, prompt: String, page: u32, base_url: Option<String>, api_key: Option<String>, model: String, context: u32) -> Result<(), String> {
+	let (provider, _server) = provider(base_url, api_key, model, context)?;
 	let d = Drawing::open(&pdf).map_err(|e| e.to_string())?;
 	let sizes = (1..=d.page_count()).map(|p| d.page_size_pt(p).map(|(w, h)| (w as f64, h as f64)).unwrap_or((612.0, 792.0))).collect();
 	drop(d);

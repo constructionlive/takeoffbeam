@@ -8,9 +8,11 @@
 //!   desktop gateway, or a hosted API.
 //! - [`channel`] runs the turn on the person's own Claude Code or Codex
 //!   subscription instead, with the same tools served to it over MCP.
+//! - [`eval`] scores the agent on drawings with known answers.
 
 mod agent;
 pub mod channel;
+pub mod eval;
 pub mod llm;
 pub mod mcp;
 pub mod prompt;

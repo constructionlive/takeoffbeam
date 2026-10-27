@@ -50,11 +50,34 @@ Decided 2026-10-14:
 - **Verdicts:** Fits, Tight (close other apps), or Not enough memory, plus the largest context
   that fits.
 
-### Still to do from slice 0
-- **Vision accuracy probe.** Measure how well Qwen3.8-27B and Gemma 4 place boxes on real
-  sheets, compared with Gemini, for each coordinate convention. Qwen3-VL answers on a 0–1000
-  grid in `[x,y]` order, which needs a third dialect. This decides whether local models run
-  full takeoff or assist, with the cloud doing detection. Needs the `view` tool (slice 4).
+### Vision accuracy probe (built 2026-10-27)
+
+`takeoff eval probe` renders a view the way the agent's `view` tool does, asks the model to box
+known targets in each coordinate convention, and scores the boxes. See [Evals](evals.md).
+Targets come from the synthetic sheets in `evals/drawings` (exact), or from your own drawings
+with the targets counted by hand in Takeoff Desk.
+
+First results, on the two synthetic sheets (18 targets: 9 receptacles, 6 light fixtures, 3 text
+labels), M3 Max 36 GB:
+
+| Model | Gemini `[y,x]` 0–1000 | Qwen `[x,y]` 0–1000 | Pixels | Verdict |
+|---|---|---|---|---|
+| Qwen3.8 27B Q4_K_M (llama.cpp) | 14/18, 0.38% | **18/18, 0.32%** | 0/18 | **full takeoff** (Qwen dialect, as mapped) |
+| Gemma 3 4B Q4_K_M (Ollama) | 0/18 | 1/18 | 0/18 | not usable |
+
+Hits / targets, then the median centre error as % of the view's long edge. About 20–60 s per
+question for the 27B model, 2–18 s for the 4B one.
+
+- **Qwen3.8 27B can place marks itself** in the dialect it is mapped to, so local full takeoff is
+  viable on a machine that runs it. It confirms the earlier 23/23 on a real sheet.
+- **Small local models assist at best.** Gemma 3 4B placed nothing usable in any dialect: use it
+  for reading, not marking.
+- **Whole jobs** (`takeoff eval run`, 900 s a case): Qwen3.8 27B passed 11 of 13 expectations.
+  It got the scale within 0.5%, both room areas within 1.1%, all 9 receptacles and every
+  title-block field. The two misses (outside wall length, light fixtures) were work it had not
+  finished when the timeout hit.
+- **Still to measure:** Gemma 4 (26B/12B) and the cloud models (Gemini, Claude, GPT), and real
+  sheets with hand-marked targets. Run `takeoff eval probe --model …` and add the rows here.
 
 ## Slices
 1. **Core.** Port `normalize` and the 3-way merge, plus the platform's coordinate dialects
@@ -135,3 +158,5 @@ Decided 2026-10-14:
   the other floors.
 - **Legends, next:** a per-space scope, and a column for a custom field.
 - **"Send to construction.live":** upload the takeoff into a project register.
+- **More eval cases from real sheets** (kept out of the repo, through `$TAKEOFF_EVAL_DRAWINGS`),
+  and a `takeoff eval run` before each release with the report kept as the next baseline.

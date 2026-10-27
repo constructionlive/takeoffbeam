@@ -250,7 +250,7 @@ impl ToolCtx {
 		v
 	}
 
-	fn view(&self, id: &str) -> Result<View, String> {
+	pub(crate) fn view(&self, id: &str) -> Result<View, String> {
 		let id = id.trim();
 		let id = if id.starts_with('v') { id.to_string() } else { format!("v{id}") };
 		self.views.iter().rev().find(|v| v.id == id).cloned().ok_or_else(|| {

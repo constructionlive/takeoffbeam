@@ -1,0 +1,24 @@
+{
+	"name": "rooms-measure",
+	"pdf": "../drawings/rooms.pdf",
+	"page": 1,
+	"notes": "Synthetic A-sheet at 1/4\" = 1'-0\": OFFICE 101 is 20'x15' (300 sf), STORAGE 102 is 12'x15' (180 sf), outside walls 94 ft. Walls are 1 pt lines, so a fill inside them reads about 0.7% under.",
+	"task": {
+		"prompt": "Set this sheet's scale and check it against a dimension. Then measure the floor area of OFFICE 101 and of STORAGE 102, as area items named \"Office\" and \"Storage\", and the length of the outside walls (the whole perimeter around both rooms) as a length item named \"Exterior walls\". Tell me the sheet number and title.",
+		"expect": [
+			{ "kind": "scale", "preset": "1/4\" = 1'-0\"" },
+			{ "kind": "area", "item": "office", "value": 300, "unit": "sf" },
+			{ "kind": "area", "item": "storage", "value": 180, "unit": "sf" },
+			{ "kind": "length", "item": "exterior", "value": 94, "unit": "ft" },
+			{ "kind": "answer", "field": "sheet number", "value": "A-101" },
+			{ "kind": "answer", "field": "sheet title", "value": "FIRST FLOOR PLAN" }
+		]
+	},
+	"probe": {
+		"targets": [
+			{ "ask": "the room name label \"OFFICE\"", "text": "OFFICE" },
+			{ "ask": "the sheet number \"A-101\" in the title block", "text": "A-101" },
+			{ "ask": "the dimension text \"12'-0\"\"", "text": "12'-0\"" }
+		]
+	}
+}
