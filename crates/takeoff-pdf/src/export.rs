@@ -117,7 +117,7 @@ fn cloud_points(pts: &[Point], aspect: f64) -> Vec<Point> {
 		let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
 		let (dx, dy) = (b.x - a.x, (b.y - a.y) * aspect);
 		let len = dx.hypot(dy).max(1e-9);
-		let n = (len / arc).ceil().max(1.0) as usize;
+		let n = (len / arc).ceil().clamp(1.0, 10_000.0) as usize;
 		let (nx, ny) = (-dy / len * sign, dx / len * sign / aspect);
 		for k in 0..n {
 			for s in 0..8 {
