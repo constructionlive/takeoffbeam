@@ -533,6 +533,38 @@ pub struct LayerInfo {
 	pub description: Option<String>,
 }
 
+/// An earlier revision of a sheet, kept when a newer one was slip-sheeted
+/// over it: the old page lives on in a history PDF beside the drawing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetRevision {
+	/// The page it is an earlier revision of (as the drawing is now).
+	pub page: u32,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub sheet: Option<String>,
+	/// The history PDF, relative to the drawing's folder (or absolute).
+	pub file: String,
+	/// Its page in that file.
+	pub file_page: u32,
+	pub replaced_at: String,
+	/// The new revision's file name and page, for the record.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub from: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub from_page: Option<u32>,
+	/// One id per slip-sheet: everything replaced together.
+	pub slip: String,
+	/// Share of the sheet that changed (0–1).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub changed: Option<f64>,
+	/// Items that sit on changed parts of the sheet: they may be wrong now.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub review: Vec<String>,
+	/// E.g. the page size changed and the items were scaled to fit.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub warning: Option<String>,
+}
+
 /// The whole takeoff for one drawing file (the `.takeoff.json` sidecar).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -568,6 +600,14 @@ pub struct TakeoffData {
 	pub overlays: Vec<Overlay>,
 	#[serde(default)]
 	pub display: DisplaySettings,
+	/// Earlier revisions of slip-sheeted pages, oldest first (see `slip`).
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub sheet_revisions: Vec<SheetRevision>,
+	/// Which version of the PDF file this takeoff goes with, within a session:
+	/// page tools and slip-sheets rewrite the file, and undo puts the matching
+	/// file back. Never saved.
+	#[serde(skip)]
+	pub pdf_state: u64,
 }
 
 impl Default for TakeoffData {
@@ -588,6 +628,8 @@ impl Default for TakeoffData {
 			viewports: vec![],
 			overlays: vec![],
 			display: DisplaySettings::default(),
+			sheet_revisions: vec![],
+			pdf_state: 0,
 		}
 	}
 }
@@ -617,5 +659,10 @@ impl TakeoffData {
 
 	pub fn page_info(&self, page: u32) -> Option<&PageInfo> {
 		self.pages.iter().find(|p| p.page == page)
+	}
+
+	/// The revision this page replaced most recently, if it was slip-sheeted.
+	pub fn previous_revision(&self, page: u32) -> Option<&SheetRevision> {
+		self.sheet_revisions.iter().rev().find(|r| r.page == page)
 	}
 }
