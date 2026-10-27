@@ -142,7 +142,7 @@ impl CosFile {
 			}
 			// Hybrid files: a classic trailer may point at an xref stream too.
 			if let Some(stm) = key(&trailer, "XRefStm").and_then(Obj::as_int) {
-				if seen.insert(stm as usize) {
+				if stm >= 0 && seen.insert(stm as usize) {
 					file.read_section(stm as usize)?;
 				}
 			}
@@ -157,13 +157,16 @@ impl CosFile {
 	/// Reads one xref section at `off`; entries already known (newer) win.
 	fn read_section(&mut self, off: usize) -> Result<(Dict, bool), CosError> {
 		let buf: &[u8] = &self.data.clone();
+		if off >= buf.len() {
+			return Err(CosError::Syntax(off, "xref offset"));
+		}
 		let mut p = Parser { buf, pos: off };
 		p.ws();
-		if buf[p.pos..].starts_with(b"xref") {
+		if p.rest().starts_with(b"xref") {
 			p.pos += 4;
 			loop {
 				p.ws();
-				if buf[p.pos..].starts_with(b"trailer") {
+				if p.rest().starts_with(b"trailer") {
 					p.pos += 7;
 					let trailer = p.object()?.as_dict().cloned().ok_or(CosError::Syntax(p.pos, "trailer"))?;
 					return Ok((trailer, false));
@@ -176,7 +179,7 @@ impl CosFile {
 					let offset: usize = parse_ascii(&line[0..10]).ok_or(CosError::Syntax(p.pos, "xref offset"))?;
 					let kind = line[17];
 					p.pos += 18;
-					self.xref.entry(start + i).or_insert(if kind == b'n' { XrefEntry::Offset(offset) } else { XrefEntry::Free });
+					self.xref.entry(start.wrapping_add(i)).or_insert(if kind == b'n' { XrefEntry::Offset(offset) } else { XrefEntry::Free });
 				}
 			}
 		}
@@ -191,7 +194,8 @@ impl CosFile {
 			.and_then(Obj::as_array)
 			.map(|a| a.iter().filter_map(Obj::as_int).map(|v| v as usize).collect())
 			.ok_or(CosError::Syntax(off, "xref /W"))?;
-		if w.len() != 3 {
+		// Fields wider than 8 bytes don't fit a u64 (and a garbage /W would overflow the row size).
+		if w.len() != 3 || w.iter().any(|&v| v > 8) {
 			return Err(CosError::Syntax(off, "xref /W"));
 		}
 		let size = key(&dict, "Size").and_then(Obj::as_int).unwrap_or(0);
@@ -220,7 +224,7 @@ impl CosFile {
 					2 => XrefEntry::InStream(a as u32, b as u32),
 					_ => XrefEntry::Free,
 				};
-				self.xref.entry((*start + i) as u32).or_insert(e);
+				self.xref.entry(start.wrapping_add(i) as u32).or_insert(e);
 			}
 		}
 		Ok((dict, true))
@@ -260,10 +264,15 @@ impl CosFile {
 		if let Some(hit) = self.objstm_cache.borrow().get(&num) {
 			return Ok(hit.clone());
 		}
+		// Object streams can't live in object streams; a file that says so would recurse forever.
+		if !matches!(self.xref.get(&num), Some(XrefEntry::Offset(_))) {
+			return Err(CosError::Syntax(0, "object stream"));
+		}
 		let Obj::Stream(dict, range) = self.get(num)? else { return Err(CosError::Syntax(0, "object stream")) };
 		let data = decode_stream(&dict, &self.data[range])?;
-		let n = key(&dict, "N").and_then(Obj::as_int).unwrap_or(0) as usize;
-		let first = key(&dict, "First").and_then(Obj::as_int).unwrap_or(0) as usize;
+		// Each header entry takes at least four bytes ("1 0 "), which bounds a garbage /N.
+		let n = key(&dict, "N").and_then(Obj::as_int).unwrap_or(0).clamp(0, data.len() as i64 / 4) as usize;
+		let first = key(&dict, "First").and_then(Obj::as_int).unwrap_or(0).max(0) as usize;
 		let mut header = Parser { buf: &data, pos: 0 };
 		let mut entries = Vec::with_capacity(n);
 		for _ in 0..n {
@@ -273,7 +282,7 @@ impl CosFile {
 		}
 		let mut out = Vec::with_capacity(n);
 		for (obj_num, off) in entries {
-			let mut p = Parser { buf: &data, pos: first + off };
+			let mut p = Parser { buf: &data, pos: first.saturating_add(off) };
 			out.push((obj_num, p.object().unwrap_or(Obj::Null)));
 		}
 		let out = Arc::new(out);
@@ -319,7 +328,8 @@ pub fn decode_stream(dict: &Dict, raw: &[u8]) -> Result<Vec<u8>, CosError> {
 	if let Some(parms) = key(dict, "DecodeParms").and_then(Obj::as_dict) {
 		let predictor = key(parms, "Predictor").and_then(Obj::as_int).unwrap_or(1);
 		if predictor >= 10 {
-			let columns = key(parms, "Columns").and_then(Obj::as_int).unwrap_or(1) as usize;
+			// No row is longer than the data, so clamping a garbage /Columns changes nothing real.
+			let columns = key(parms, "Columns").and_then(Obj::as_int).unwrap_or(1).clamp(1, data.len().max(1) as i64) as usize;
 			data = png_unpredict(&data, columns);
 		}
 	}
@@ -377,6 +387,11 @@ impl<'a> Parser<'a> {
 		self.buf.get(self.pos).copied()
 	}
 
+	/// The bytes from `pos` on (empty past the end: offsets come from the file).
+	fn rest(&self) -> &'a [u8] {
+		self.buf.get(self.pos..).unwrap_or_default()
+	}
+
 	fn ws(&mut self) {
 		while let Some(b) = self.peek() {
 			if is_ws(b) {
@@ -403,7 +418,7 @@ impl<'a> Parser<'a> {
 			}
 			self.pos += 1;
 		}
-		&self.buf[start..self.pos]
+		self.buf.get(start..self.pos).unwrap_or_default()
 	}
 
 	fn int(&mut self) -> Result<i64, CosError> {
@@ -442,7 +457,7 @@ impl<'a> Parser<'a> {
 				let mut d = Dict::new();
 				loop {
 					self.ws();
-					if self.buf[self.pos..].starts_with(b">>") {
+					if self.rest().starts_with(b">>") {
 						self.pos += 2;
 						break;
 					}
@@ -456,7 +471,7 @@ impl<'a> Parser<'a> {
 				// A stream follows its dictionary.
 				let save = self.pos;
 				self.ws();
-				if self.buf[self.pos..].starts_with(b"stream") {
+				if self.rest().starts_with(b"stream") {
 					self.pos += 6;
 					if self.peek() == Some(b'\r') {
 						self.pos += 1;
@@ -465,13 +480,13 @@ impl<'a> Parser<'a> {
 						self.pos += 1;
 					}
 					let start = self.pos;
-					let len = key(&d, "Length").and_then(Obj::as_int).map(|l| l as usize);
+					let len = key(&d, "Length").and_then(Obj::as_int).and_then(|l| usize::try_from(l).ok()).and_then(|l| l.checked_add(start));
 					let end = match len {
-						Some(l) if self.buf.get(start + l..).is_some_and(|rest| {
+						Some(end) if self.buf.get(end..).is_some_and(|rest| {
 							let mut q = Parser { buf: rest, pos: 0 };
 							q.ws();
-							rest[q.pos..].starts_with(b"endstream")
-						}) => start + l,
+							q.rest().starts_with(b"endstream")
+						}) => end,
 						// Indirect or wrong /Length: scan for endstream.
 						_ => find_from(self.buf, start, b"endstream").ok_or(CosError::Syntax(start, "endstream"))?,
 					};
@@ -488,7 +503,9 @@ impl<'a> Parser<'a> {
 					self.pos += 1;
 				}
 				let hex: Vec<u8> = self.buf[start..self.pos].iter().copied().filter(|c| c.is_ascii_hexdigit()).collect();
-				self.pos += 1;
+				if self.peek().is_some() {
+					self.pos += 1;
+				}
 				let mut out = Vec::with_capacity(hex.len() / 2 + 1);
 				for pair in hex.chunks(2) {
 					let hi = (pair[0] as char).to_digit(16).unwrap_or(0);
@@ -780,5 +797,103 @@ mod tests {
 	#[test]
 	fn utf16_names() {
 		assert_eq!(text_string(&[0xFE, 0xFF, 0, b'E', 0, b'-', 0x00, 0xE9]), "E-é");
+	}
+
+	fn cos(bytes: &[u8]) -> Result<CosFile, CosError> {
+		let mut m = memmap2::MmapMut::map_anon(bytes.len().max(1))?;
+		m[..bytes.len()].copy_from_slice(bytes);
+		CosFile::from_mmap(Arc::new(m.make_read_only()?))
+	}
+
+	fn sample() -> Vec<u8> {
+		sample_with(false)
+	}
+
+	/// Catalog, an object stream holding object 3, and an xref stream (/W [1 4 2]).
+	/// `self_ref`: the xref says the object stream is inside itself.
+	fn sample_with(self_ref: bool) -> Vec<u8> {
+		let mut b = b"%PDF-1.5\n".to_vec();
+		let body = b"3 0 << /Name (A) /Raw <4142> >>";
+		let objs = [b"<< /Type /Catalog /OCProperties << /OCGs [3 0 R] >> >>".to_vec(), [format!("<< /Type /ObjStm /N 1 /First 4 /Length {} >>\nstream\n", body.len()).as_bytes(), body, b"\nendstream"].concat()];
+		let mut offs = Vec::new();
+		for (i, o) in objs.iter().enumerate() {
+			offs.push(b.len() as u32);
+			b.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+			b.extend_from_slice(o);
+			b.extend_from_slice(b"\nendobj\n");
+		}
+		let xref_at = b.len();
+		let mut rows = Vec::new();
+		for (t, a) in [(0u8, 0u32), (1, offs[0]), if self_ref { (2, 2) } else { (1, offs[1]) }, (2, 2), (1, xref_at as u32)] {
+			rows.push(t);
+			rows.extend_from_slice(&a.to_be_bytes());
+			rows.extend_from_slice(&0u16.to_be_bytes());
+		}
+		b.extend_from_slice(format!("4 0 obj\n<< /Type /XRef /Size 5 /W [1 4 2] /Root 1 0 R /Length {} >>\nstream\n", rows.len()).as_bytes());
+		b.extend_from_slice(&rows);
+		b.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+		b
+	}
+
+	fn poke(f: &CosFile) {
+		for n in 0..8 {
+			if let Ok(o) = f.get(n) {
+				let _ = f.resolve(&o);
+			}
+		}
+	}
+
+	#[test]
+	fn reads_sample() {
+		let f = cos(&sample()).unwrap();
+		assert_eq!(f.root_ref(), Some((1, 0)));
+		assert_eq!(key(f.get(3).unwrap().as_dict().unwrap(), "Raw"), Some(&Obj::Str(b"AB".to_vec())));
+	}
+
+	#[test]
+	fn truncated_or_mangled_files_never_panic() {
+		let src = sample();
+		for n in 1..src.len() {
+			if let Ok(f) = cos(&src[..n]) {
+				poke(&f);
+			}
+		}
+		for i in 0..src.len() {
+			for v in [b'0', b'9', b'-', b'<', b'(', b'[', b' ', 0xFF] {
+				let mut b = src.clone();
+				b[i] = v;
+				if let Ok(f) = cos(&b) {
+					poke(&f);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn garbage_objects_error_not_panic() {
+		// A hex string cut off by the end of the buffer inside a dictionary.
+		assert!(Parser { buf: b"<< /K <ab", pos: 0 }.object().is_err());
+		// Negative /Length: scan for endstream instead.
+		let o = Parser { buf: b"<< /Length -1 >>\nstream\nabc\nendstream", pos: 0 }.object().unwrap();
+		assert!(matches!(o, Obj::Stream(_, r) if r == (24..28)));
+		// Offsets past the end of the buffer.
+		assert!(Parser { buf: b"1 0 obj", pos: 99 }.int().is_err());
+		// A garbage predictor row width.
+		let mut parms = Dict::new();
+		parms.insert(b"Predictor".to_vec(), Obj::Int(12));
+		parms.insert(b"Columns".to_vec(), Obj::Int(-1));
+		let mut d = Dict::new();
+		d.insert(b"DecodeParms".to_vec(), Obj::Dict(parms));
+		assert!(decode_stream(&d, b"\x00\x01\x00\x02").is_ok());
+		// /W wider than a u64, an /XRefStm past the end, and an object stream that lives in itself.
+		let swap = |from: &str, to: &str| {
+			let src = sample();
+			let at = src.windows(from.len()).position(|w| w == from.as_bytes()).unwrap();
+			[&src[..at], to.as_bytes(), &src[at + from.len()..]].concat()
+		};
+		assert!(cos(&swap("/W [1 4 2]", "/W [9 4 2]")).is_err());
+		assert!(cos(&swap("/Size 5", "/XRefStm 99999999")).is_err());
+		let f = cos(&sample_with(true)).unwrap();
+		assert!(f.get(3).is_err());
 	}
 }
