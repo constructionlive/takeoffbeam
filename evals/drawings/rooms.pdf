@@ -1,0 +1,71 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1224 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 1257 >>
+stream
+0 0 0 RG 0 0 0 rg 1 w
+2 w
+18.00 18.00 1188.00 756.00 re S
+1 w
+1000.00 18.00 206.00 134.00 re S
+1000.00 116.00 m 1206.00 116.00 l S
+1000.00 54.00 m 1206.00 54.00 l S
+BT /F1 12 Tf 1010.00 128.00 Td (EVAL PROJECT) Tj ET
+BT /F1 11 Tf 1010.00 92.00 Td (FIRST FLOOR PLAN) Tj ET
+BT /F1 9 Tf 1010.00 68.00 Td (SCALE: 1/4" = 1'-0") Tj ET
+BT /F1 16 Tf 1010.00 30.00 Td (A-101) Tj ET
+200.00 592.00 m 776.00 592.00 l S
+200.00 322.00 m 776.00 322.00 l S
+200.00 592.00 m 200.00 322.00 l S
+776.00 592.00 m 776.00 322.00 l S
+560.00 592.00 m 560.00 482.00 l S
+560.00 428.00 m 560.00 322.00 l S
+560.00 428.00 m 614.00 428.00 l S
+0.5 w
+200.00 632.00 m 560.00 632.00 l S
+196.00 628.00 m 204.00 636.00 l S
+556.00 628.00 m 564.00 636.00 l S
+1 w
+BT /F1 10 Tf 366.00 638.00 Td (20'-0") Tj ET
+0.5 w
+560.00 632.00 m 776.00 632.00 l S
+556.00 628.00 m 564.00 636.00 l S
+772.00 628.00 m 780.00 636.00 l S
+1 w
+BT /F1 10 Tf 654.00 638.00 Td (12'-0") Tj ET
+0.5 w
+160.00 592.00 m 160.00 322.00 l S
+156.00 588.00 m 164.00 596.00 l S
+156.00 318.00 m 164.00 326.00 l S
+1 w
+BT /F1 10 Tf 120.00 453.00 Td (15'-0") Tj ET
+BT /F1 12 Tf 345.00 462.00 Td (OFFICE) Tj ET
+BT /F1 12 Tf 365.00 446.00 Td (101) Tj ET
+BT /F1 12 Tf 635.00 462.00 Td (STORAGE) Tj ET
+BT /F1 12 Tf 655.00 446.00 Td (102) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000242 00000 n 
+0000001550 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1647
+%%EOF

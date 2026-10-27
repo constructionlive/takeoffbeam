@@ -1,0 +1,27 @@
+{
+	"name": "symbols-count",
+	"pdf": "../drawings/symbols.pdf",
+	"page": 1,
+	"notes": "Synthetic E-sheet at 1/8\" = 1'-0\": 9 duplex receptacles and 6 light fixtures in the plan, one of each in the legend (not counted). Boxes are page fractions from crates/takeoff-agent/src/eval/synth.rs.",
+	"task": {
+		"prompt": "Count the duplex receptacles and the light fixtures in the floor plan on this sheet. The legend shows both symbols; the legend's own symbols are not part of the count. Mark every one, as count items named \"Duplex receptacles\" and \"Light fixtures\". Then tell me the sheet number.",
+		"expect": [
+			{ "kind": "count", "item": "receptacle", "value": 9 },
+			{ "kind": "count", "item": "light", "value": 6 },
+			{ "kind": "answer", "field": "sheet number", "value": "E-101" }
+		]
+	},
+	"probe": {
+		"region": [0.04, 0.06, 0.74, 0.86],
+		"targets": [
+			{
+				"ask": "every duplex receptacle symbol (a small circle with two short parallel lines through it)",
+				"boxes": [[0.14134, 0.107323, 0.011438, 0.027778], [0.304739, 0.107323, 0.011438, 0.027778], [0.566176, 0.107323, 0.011438, 0.027778], [0.190359, 0.824495, 0.011438, 0.027778], [0.517157, 0.824495, 0.011438, 0.027778], [0.696895, 0.824495, 0.011438, 0.027778], [0.072712, 0.364899, 0.011438, 0.027778], [0.072712, 0.642677, 0.011438, 0.027778], [0.732843, 0.301768, 0.011438, 0.027778]]
+			},
+			{
+				"ask": "every light fixture symbol (a small square with an X in it)",
+				"boxes": [[0.155229, 0.30303, 0.01634, 0.025253], [0.302288, 0.30303, 0.01634, 0.025253], [0.155229, 0.618687, 0.01634, 0.025253], [0.302288, 0.618687, 0.01634, 0.025253], [0.571895, 0.277778, 0.01634, 0.025253], [0.571895, 0.656566, 0.01634, 0.025253]]
+			}
+		]
+	}
+}

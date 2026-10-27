@@ -1,0 +1,16 @@
+{
+	"name": "title-block",
+	"pdf": "../drawings/rooms.pdf",
+	"page": 1,
+	"notes": "Reading only: the quickest case, and the one a small local model should pass.",
+	"task": {
+		"prompt": "Read this sheet's title block: what are the project name, the sheet number, the sheet title and the printed scale? Just answer; don't mark anything.",
+		"timeout_secs": 600,
+		"expect": [
+			{ "kind": "answer", "field": "project", "value": "EVAL PROJECT" },
+			{ "kind": "answer", "field": "sheet number", "value": "A-101" },
+			{ "kind": "answer", "field": "sheet title", "value": "FIRST FLOOR PLAN" },
+			{ "kind": "answer", "field": "scale", "value": "1/4\"" }
+		]
+	}
+}
