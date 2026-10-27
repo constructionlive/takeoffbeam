@@ -124,6 +124,10 @@ Decided 2026-10-14:
 - **Windows and Linux installers.** CI already builds and tests on Linux.
 - **Continuous-scroll page view and two-page spreads.**
 - **Auto area:** click inside a closed region.
-- **Spaces, markup legends, sets/slip-sheets.**
+- **Sets/slip-sheets.**
+- **Spaces, next:** split lengths at space boundaries as an option (today a length goes whole
+  to the space holding most of it); spaces in the agent's renders; copying a floor's spaces to
+  the other floors.
+- **Legends, next:** a per-space scope, and a column for a custom field.
 - **"Send to construction.live":** upload the takeoff into a project register.
 - **Opening PDFs from Finder** (Apple Events) as well as drag-drop and the Open dialog.

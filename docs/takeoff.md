@@ -69,6 +69,47 @@ each other piece to join them into one area. If the space is open to the rest of
 nothing is filled and the status bar says so; use *Area* and click its corners. It works on scans
 too.
 
+## Spaces
+
+A **space** is a named region of a sheet: a level, a unit, a room ("Level 2", "Unit 204",
+"Kitchen"). Every quantity inside a space belongs to it, so you can see what is in each one.
+Start from **Spaces → New** in the Takeoff tab:
+
+- **Draw a space:** click its corners like an area; double-click or Enter to close.
+- **Fill a space:** click inside a room; it is outlined along the drawn lines, like *Fill area*.
+  Shift-click the next piece to add it.
+
+A new space is selected and named "Space 1", "Space 2"…; rename it in **Properties**, or
+double-click its name in the list. The list shows spaces as a tree, each under the space it sits
+in. From it you can recolor, hide (it still counts) and delete a space (its quantities stay). On
+the sheet a space shows as a tinted, dashed outline with its name: click the outline or the name
+to select it, drag it to move it, and drag a corner to reshape it.
+
+**Which space an item is in:**
+- A count: the space around the middle of its mark. An angle: around its vertex. A markup:
+  around the middle of its bounds.
+- An area: around a point inside it (its centre, or for an L-shaped area the middle of the
+  widest span across it at that height).
+- A length that crosses a boundary is not split: it belongs to the deepest space holding more
+  than half of it, else to the space holding the most of it. A run half in the kitchen and half
+  in the bath belongs to the unit around both. Totals are the same with or without spaces.
+- Spaces nest by shape: one drawn inside another is inside it, with no extra step. The
+  smallest space around an item wins, and the item's space is shown with its full path:
+  `Level 2 › Unit 204 › Kitchen`.
+- An outline counts as inside, so a mark on the wall between two rooms goes to the smaller room
+  (for rooms of the same size, the one drawn last).
+
+Where spaces show:
+- **Takeoff tab:** *Totals for* limits the item totals to one space and the spaces inside it.
+  *By space* lists the totals per space; each quantity counts once, in its deepest space, so the
+  groups add up to the whole.
+- **Markups List:** a *Space* column (sortable and searchable), and a space filter that includes
+  the spaces inside the one you pick.
+- **CSV:** the markups CSV has a *Space* column. With spaces, *Summary CSV* has one line per space
+  and item, with the space first.
+- **The AI:** `read_items` gives each item's space and can list one space's items; `summary`
+  totals per space.
+
 ## Editing
 
 - **Select (V):**
@@ -102,12 +143,12 @@ Chest* reuses it.
 
 ## Markups List
 
-The bottom panel lists every count, measurement and markup with these columns: page, type, subject
-(item), number, label, quantity, details (perimeter / volume), status, author, date, your custom
-columns, and note.
+The bottom panel lists every count, measurement and markup with these columns: page, space, type,
+subject (item), number, label, quantity, details (perimeter / volume), status, author, date, your
+custom columns, and note.
 - **Sort:** click a header.
-- **Filter:** by text, *This page*, or *To review*.
+- **Filter:** by text, *This page*, *To review*, or a space.
 - **Jump:** click a row to go to the item; double-click to zoom to it.
 - **Custom columns:** add them under *Columns*. Edit the values in Properties.
 - **Export:** *Export CSV* writes the full list; *Summary CSV* writes one line per item (count or
-  total, unit, volume, unit cost, cost).
+  total, unit, volume, unit cost, cost), or one per space and item when there are spaces.
