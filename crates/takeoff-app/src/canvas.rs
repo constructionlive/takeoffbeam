@@ -68,6 +68,18 @@ pub struct Canvas {
 	pub user_moved: bool,
 	/// Rasterized overlays by id: (content key, texture or why it failed).
 	overlay_tex: HashMap<String, (u64, Result<egui::TextureHandle, String>)>,
+	/// A fill the worker is making.
+	fill_job: Option<FillJob>,
+	/// The last fill: (measurement, page, points clicked), for Shift-click to add to.
+	last_fill: Option<(String, u32, Vec<Point>)>,
+}
+
+struct FillJob {
+	token: u64,
+	page: u32,
+	at: Vec<Point>,
+	/// Shift-click: the fill to grow, instead of a new one.
+	grow: Option<String>,
 }
 
 impl Default for Canvas {
@@ -97,6 +109,8 @@ impl Default for Canvas {
 			trackpad: false,
 			user_moved: false,
 			overlay_tex: HashMap::new(),
+			fill_job: None,
+			last_fill: None,
 		}
 	}
 }
@@ -194,6 +208,46 @@ impl Canvas {
 		(a, b)
 	}
 
+	/// Turn a finished fill into an area measurement (or the bigger outline
+	/// of the one Shift-clicked).
+	fn poll_fill(&mut self, doc: &mut OpenDoc, ctx: &egui::Context) {
+		let Some(job) = &self.fill_job else { return };
+		let Some(res) = doc.take_fill(job.token) else {
+			ctx.request_repaint_after(std::time::Duration::from_millis(50));
+			return;
+		};
+		let job = self.fill_job.take().unwrap();
+		use takeoff_pdf::fill::NoFill;
+		match res {
+			Some(Ok(f)) => {
+				let id = match job.grow {
+					Some(id) => {
+						doc.doc.lock().edit("Fill area", |d| {
+							if let Some(m) = d.measurements.iter_mut().find(|m| m.id == id) {
+								m.points = f.points;
+							}
+						});
+						id
+					}
+					None => {
+						let cat = self.category_for(doc, CategoryKind::Area);
+						let mut m = Measurement::new(new_id("ms"), job.page, MeasurementType::Area, f.points);
+						m.category_id = Some(cat);
+						m.meta = doc.doc.lock().new_meta();
+						let id = m.id.clone();
+						doc.doc.lock().edit("Fill area", |d| d.measurements.push(m));
+						id
+					}
+				};
+				self.flash = Some(([id.clone()].into(), Instant::now()));
+				self.last_fill = Some((id, job.page, job.at));
+			}
+			Some(Err(NoFill::OnLine)) => self.requests.push(CanvasRequest::Status("That's on a line. Click in the open space inside.".into())),
+			Some(Err(NoFill::Open)) => self.requests.push(CanvasRequest::Status("No closed outline around that point: the lines leave it open. Use Area and click its corners.".into())),
+			None => self.requests.push(CanvasRequest::Status("Couldn't read this page to fill it.".into())),
+		}
+	}
+
 	// ── Main entry ──────────────────────────────────────────────────────
 
 	pub fn ui(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc, p: &Palette, snap_on: bool, wheel_zooms: bool) {
@@ -205,6 +259,7 @@ impl Canvas {
 		}
 		let ctx = ui.ctx().clone();
 		doc.update_renders(&ctx);
+		self.poll_fill(doc, &ctx);
 		let painter = ui.painter_at(rect);
 		painter.rect_filled(rect, 0.0, p.canvas);
 
@@ -1032,6 +1087,20 @@ impl Canvas {
 							self.finish_points(doc);
 						}
 					}
+				}
+			}
+			Tool::Fill => {
+				ui.ctx().set_cursor_icon(if self.fill_job.is_some() { CursorIcon::Progress } else { CursorIcon::Crosshair });
+				if resp.clicked() && in_canvas && self.fill_job.is_none() {
+					let raw = doc.to_page(pos);
+					// Shift-click: another piece of the last fill, filled together with it.
+					let grow = self.last_fill.clone().filter(|(id, page, _)| mods.shift && *page == doc.page && doc.doc.lock().data.measurements.iter().any(|m| &m.id == id));
+					let at = match &grow {
+						Some((_, _, at)) => at.iter().copied().chain([raw]).collect(),
+						None => vec![raw],
+					};
+					let token = doc.request_fill(at.clone());
+					self.fill_job = Some(FillJob { token, page: doc.page, at, grow: grow.map(|g| g.0) });
 				}
 			}
 			Tool::FollowLine => {

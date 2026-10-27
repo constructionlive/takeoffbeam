@@ -32,6 +32,7 @@ between `12.50 ft` and `12'-6"`.
 | Trace line | | Click points **on** a drawn line (its start, its end, anywhere it forks): the length runs along that line between them, through dashes and past lines that cross it. |
 | Perimeter | P | Like Length, but closes the loop. |
 | Area | A | Click the corners; double-click or Enter closes it. Shows area and perimeter. |
+| Fill area | | Click inside a room or any space bounded by lines: it is outlined along the drawn lines. Shift-click another piece to add it. |
 | Rectangle area | B | Drag a rectangle. |
 | Volume | U | An area, then you type its depth (e.g. 0.33 ft for a 4" slab). Shows yd³ too. |
 | Cutout | X | Select an area, then click the corners of the hole to subtract. |
@@ -57,6 +58,16 @@ two rails) can't be traced. Where no single line joins two points, that span sta
 
 Either way the result is an ordinary length (or markup): the curve is stored as many short
 segments, so its value is right in the Takeoff list, the exports and construction.live.
+
+**Fill area.** One click measures a room, a slab, a paved area or an opening. The outline follows
+the inside face of the lines around the point, so text, tags and symbols inside the space count as
+part of it. Doorways and other openings close by themselves with a straight line from jamb to
+jamb. On a page with a scale the openings tried are real widths (a door, a pair of doors, a wide
+opening); without a scale they are paper widths. If a line crosses the space (a stair in an
+opening, an X across a shaft, a hatch edge), only the piece you clicked fills: **Shift-click**
+each other piece to join them into one area. If the space is open to the rest of the page,
+nothing is filled and the status bar says so; use *Area* and click its corners. It works on scans
+too.
 
 ## Editing
 

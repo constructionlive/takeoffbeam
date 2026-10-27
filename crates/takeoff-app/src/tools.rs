@@ -16,6 +16,8 @@ pub enum Tool {
 	Trace,
 	Perimeter,
 	Area,
+	/// The space around the point clicked, outlined along the drawn lines.
+	Fill,
 	RectArea,
 	Volume,
 	Cutout,
@@ -36,7 +38,7 @@ pub enum Group {
 }
 
 impl Tool {
-	pub const MEASURE: [Tool; 13] = [Tool::Count, Tool::Length, Tool::Curve, Tool::Trace, Tool::Perimeter, Tool::Area, Tool::RectArea, Tool::Volume, Tool::Cutout, Tool::Angle, Tool::FollowLine, Tool::Calibrate, Tool::Viewport];
+	pub const MEASURE: [Tool; 14] = [Tool::Count, Tool::Length, Tool::Curve, Tool::Trace, Tool::Perimeter, Tool::Area, Tool::Fill, Tool::RectArea, Tool::Volume, Tool::Cutout, Tool::Angle, Tool::FollowLine, Tool::Calibrate, Tool::Viewport];
 	pub const MARKUP: [Tool; 13] = [
 		Tool::Annot(AnnotationKind::Text),
 		Tool::Annot(AnnotationKind::Callout),
@@ -64,6 +66,7 @@ impl Tool {
 			Tool::CurveMarkup => "Curve",
 			Tool::Perimeter => "Perimeter",
 			Tool::Area => "Area",
+			Tool::Fill => "Fill Area",
 			Tool::RectArea => "Rectangle Area",
 			Tool::Volume => "Volume",
 			Tool::Cutout => "Cutout",
@@ -85,6 +88,7 @@ impl Tool {
 			Tool::Trace => i::ROUTE,
 			Tool::Perimeter => i::WAYPOINTS,
 			Tool::Area => i::PENTAGON,
+			Tool::Fill => i::PAINT_BUCKET,
 			Tool::RectArea => i::SQUARE_DASHED,
 			Tool::Volume => i::BOX,
 			Tool::Cutout => i::SCISSORS,
@@ -112,7 +116,7 @@ impl Tool {
 	pub fn shortcut(self) -> Option<char> {
 		Some(match self {
 			// Every letter is taken.
-			Tool::Curve | Tool::Trace | Tool::CurveMarkup => return None,
+			Tool::Curve | Tool::Trace | Tool::CurveMarkup | Tool::Fill => return None,
 			Tool::Select => 'V',
 			Tool::Pan => 'H',
 			Tool::Count => 'C',
@@ -153,6 +157,7 @@ impl Tool {
 			Tool::Trace => "Click points ON a drawn line (start, end, where it forks) · it follows the line between them · double-click or Enter to finish",
 			Tool::CurveMarkup => "Click points along the curve · double-click to finish",
 			Tool::Area | Tool::Volume => "Click the corners · double-click or Enter to close",
+			Tool::Fill => "Click inside a room or space to measure it (doorways close by themselves) · Shift-click another piece to add it",
 			Tool::RectArea => "Drag a rectangle",
 			Tool::Cutout => "Select an area first, then click the hole's corners",
 			Tool::Angle => "Click arm, vertex, arm",
@@ -171,7 +176,7 @@ impl Tool {
 		match self {
 			Tool::Count => Some(CategoryKind::Count),
 			Tool::Length | Tool::Curve | Tool::Trace | Tool::Perimeter | Tool::FollowLine => Some(CategoryKind::Length),
-			Tool::Area | Tool::RectArea | Tool::Volume => Some(CategoryKind::Area),
+			Tool::Area | Tool::Fill | Tool::RectArea | Tool::Volume => Some(CategoryKind::Area),
 			_ => None,
 		}
 	}

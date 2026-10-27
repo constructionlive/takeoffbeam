@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use takeoff_core::geometry::{bounds, iou, point_segment_distance_px};
+use takeoff_core::geometry::{bounds, iou, point_segment_distance_px, scale_units_per_px};
 use takeoff_core::numbering::{mark_seq, measurement_seq};
 use takeoff_core::*;
 
@@ -409,6 +409,116 @@ pub fn add_measurements(ctx: &mut ToolCtx, a: AddMeasurementsArgs) -> Result<Too
 	changed(ctx);
 	let mut out = ToolOutput::text(format!("Added {} measurement(s).{moved_note}\n{}", ids.len(), lines.join("\n")));
 	if let Some(img) = evidence(ctx, v.page, &ids, "add_measurements") {
+		out.images.push(img);
+	}
+	Ok(out)
+}
+
+// ── fill_area ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct FillItem {
+	/// One point inside the space, or several that fill together as one.
+	pub points: Vec<Value>,
+	/// area (default) | perimeter
+	#[serde(rename = "type")]
+	pub kind: Option<String>,
+	/// Widest opening to close, in the page's scale unit; default: found.
+	pub gap: Option<f64>,
+	pub label: Option<String>,
+	pub note: Option<String>,
+	pub depth: Option<f64>,
+}
+
+#[derive(Deserialize)]
+pub struct FillArgs {
+	pub view: String,
+	pub items: Vec<FillItem>,
+	pub category: Option<String>,
+}
+
+/// Measure spaces by a point inside each: the outline the drawn lines make
+/// around it, doorways and other openings closed.
+pub fn fill_area(ctx: &mut ToolCtx, a: FillArgs) -> Result<ToolOutput, String> {
+	let v = ctx.view(&a.view)?;
+	if a.items.is_empty() || a.items.len() > 30 {
+		return Err("give 1-30 items".into());
+	}
+	let (w, h) = ctx.doc.lock().page_size_pt(v.page);
+	let mut shapes = Vec::new();
+	let mut lines = Vec::new();
+	for (k, it) in a.items.iter().enumerate() {
+		let perimeter = match it.kind.as_deref().map(str::to_lowercase).as_deref() {
+			None | Some("area") => false,
+			Some("perimeter") => true,
+			Some(other) => return Err(format!("unknown type '{other}' (area, perimeter)")),
+		};
+		let pts: Vec<Point> = it.points.iter().map(|p| view_point_to_page(&v, p)).collect::<Result<_, _>>()?;
+		if pts.is_empty() {
+			return Err(format!("item {}: give a point inside the space", k + 1));
+		}
+		// Openings to try: real door widths at the page's scale; or the one asked for.
+		let pt_per_unit = {
+			let doc = ctx.doc.lock();
+			doc.data.scale_at(v.page, pts[0]).and_then(|s| scale_units_per_px(s, w, h).map(|u| (1.0 / u, s.unit.clone())))
+		};
+		let gaps = match (it.gap, &pt_per_unit) {
+			(Some(g), Some((p, _))) => vec![g * p],
+			(Some(_), None) => return Err("gap is in the scale unit, and this page has no scale yet: leave it out".into()),
+			(None, Some((p, unit))) => takeoff_pdf::fill::gaps(takeoff_core::units::length_factor("m", unit).map(|f| f * p)),
+			(None, None) => takeoff_pdf::fill::gaps(None),
+		};
+		match ctx.drawing.fill_area(v.page, &pts, &gaps).map_err(|e| e.to_string())? {
+			Ok(f) => {
+				let how = if f.gap_pt > 0.0 { format!(", openings up to {:.0} pt of paper closed", f.gap_pt) } else { String::new() };
+				shapes.push((k, perimeter, f.points, it, how));
+			}
+			Err(takeoff_pdf::fill::NoFill::OnLine) => lines.push(format!("item {}: that point is on the line work, not in a space; put it in the open paper inside", k + 1)),
+			Err(takeoff_pdf::fill::NoFill::Open) => lines.push(format!("item {}: no closed outline around that point (the lines leave it open to the page); outline it with add_measurements, or give gap", k + 1)),
+		}
+	}
+	let cat = match (&a.category, shapes.is_empty()) {
+		(Some(c), false) => Some(resolve_category(ctx, c, if shapes.iter().all(|s| s.1) { CategoryKind::Length } else { CategoryKind::Area }, true, None)?),
+		_ => None,
+	};
+	let mut ids = Vec::new();
+	{
+		let mut doc = ctx.doc.lock();
+		let mut new = Vec::new();
+		let mut hows = Vec::new();
+		for (k, perimeter, pts, it, how) in shapes {
+			let n = pts.len();
+			let mut m = Measurement::new(new_id("ms"), v.page, if perimeter { MeasurementType::Length } else { MeasurementType::Area }, pts);
+			m.closed = perimeter;
+			m.category_id = cat.clone();
+			m.label = it.label.clone();
+			m.note = it.note.clone();
+			m.depth = it.depth;
+			m.source = Some(Source::Ai);
+			m.meta = ai_meta();
+			ids.push(m.id.clone());
+			hows.push((k, n, how));
+			new.push(m);
+		}
+		if !new.is_empty() {
+			doc.edit(&format!("AI: fill {} area(s)", new.len()), |d| d.measurements.extend(new));
+		}
+		for (id, (k, n, how)) in ids.iter().zip(hows) {
+			if let Some(m) = doc.data.measurements.iter().find(|m| &m.id == id) {
+				let value = match (m.value, &m.unit) {
+					(Some(val), Some(u)) => format!("{val:.2} {u}"),
+					_ => format!("no value (page {} has no scale yet)", v.page),
+				};
+				lines.push(format!("item {}: {id} = {value} ({n} vertices{how})", k + 1));
+			}
+		}
+	}
+	lines.sort();
+	if !ids.is_empty() {
+		changed(ctx);
+	}
+	let mut out = ToolOutput::text(format!("Filled {} of {} space(s). Check the render: a fill that leaked through an opening shows far bigger than the space; delete it and give gap, or outline it.\n{}", ids.len(), a.items.len(), lines.join("\n")));
+	if let Some(img) = evidence(ctx, v.page, &ids, "fill_area") {
 		out.images.push(img);
 	}
 	Ok(out)

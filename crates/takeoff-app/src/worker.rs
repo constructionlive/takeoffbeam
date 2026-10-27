@@ -26,6 +26,8 @@ pub enum Req {
 	Segments { page: u32 },
 	/// Follow the line drawn from near `a` to near `b` in the page's picture.
 	Trace { page: u32, a: takeoff_core::Point, b: takeoff_core::Point },
+	/// Fill the space around these points (openings to try, points of paper).
+	Fill { token: u64, page: u32, at: Vec<takeoff_core::Point>, gaps: Vec<f64> },
 	Search { query: String, match_case: bool, whole_word: bool, generation: u64, from: u32 },
 	SetHidden(HashSet<String>),
 	Reload,
@@ -49,6 +51,8 @@ pub enum Res {
 	Crop { key: String, image: egui::ColorImage },
 	Segments { page: u32, segments: Vec<Segment> },
 	Trace { page: u32, a: takeoff_core::Point, b: takeoff_core::Point, run: Option<Vec<takeoff_core::Point>> },
+	/// None: the page could not be read.
+	Fill { token: u64, fill: Option<Result<takeoff_pdf::fill::Fill, takeoff_pdf::fill::NoFill>> },
 	Search { generation: u64, hits: Vec<Hit>, done: bool },
 	LayersApplied,
 	Compare { page: u32, image: egui::ColorImage, changed: f32 },
@@ -146,7 +150,7 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 				Req::SetHidden(_) | Req::Reload | Req::Compare { .. } => 0,
 				Req::View { .. } => 1,
 				Req::Base { .. } => 2,
-				Req::Segments { .. } | Req::Trace { .. } => 3,
+				Req::Segments { .. } | Req::Trace { .. } | Req::Fill { .. } => 3,
 				Req::Search { .. } => 4,
 				Req::Thumb { .. } | Req::Crop { .. } => 5,
 			})
@@ -205,6 +209,10 @@ fn run(path: PathBuf, hidden: HashSet<String>, rx: Receiver<Req>, tx: Sender<Res
 			Req::Trace { page, a, b } => {
 				let run = d.track_raster(page, a, b).ok().flatten();
 				send(Res::Trace { page, a, b, run });
+			}
+			Req::Fill { token, page, at, gaps } => {
+				let fill = d.fill_area(page, &at, &gaps).ok();
+				send(Res::Fill { token, fill });
 			}
 			Req::Search { query, match_case, whole_word, generation, from } => {
 				let n = d.page_count();

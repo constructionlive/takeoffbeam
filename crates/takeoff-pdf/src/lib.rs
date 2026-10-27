@@ -8,6 +8,7 @@
 pub mod burn;
 pub mod cos;
 pub mod export;
+pub mod fill;
 pub mod layers;
 pub mod ops;
 pub mod outline;
@@ -236,6 +237,13 @@ impl Drawing {
 	/// Renders `region` of `page` at `dpi`. When `max_px` is set and the output
 	/// would be larger on its long edge, the DPI is lowered to fit.
 	pub fn render(&self, page: u32, dpi: f32, region: FracRect, max_px: Option<u32>) -> Result<Render, PdfError> {
+		self.render_lines(page, dpi, region, max_px, true)
+	}
+
+	/// [`Drawing::render`]; `smooth: false` draws lines without anti-aliasing,
+	/// so a hairline stays a solid pixel wide at any resolution (for reading
+	/// the line work, not for looking at).
+	pub fn render_lines(&self, page: u32, dpi: f32, region: FracRect, max_px: Option<u32>, smooth: bool) -> Result<Render, PdfError> {
 		let p = self.page(page)?;
 		let region = clamp_region(region).ok_or(PdfError::EmptyRegion)?;
 		let (pw_pt, ph_pt) = (p.width().value as f64, p.height().value as f64);
@@ -260,6 +268,7 @@ impl Drawing {
 			.render_form_data(true)
 			.render_annotations(true)
 			.clear_before_rendering(true)
+			.set_path_smoothing(smooth)
 			.set_clear_color(PdfColor::WHITE);
 		p.render_into_bitmap_with_config(&mut bitmap, &config)?;
 		let image = RgbaImage::from_raw(out_w as u32, out_h as u32, bitmap.as_rgba_bytes())

@@ -199,7 +199,7 @@ impl RightPanel {
 							d.edit("New item", |t| t.categories.push(Category::new(id.clone(), name.clone(), color, kind)));
 							drop(d);
 							canvas.active_category = Some(id.clone());
-							canvas.set_tool(match kind { CategoryKind::Count => Tool::Count, CategoryKind::Length => Tool::Length, CategoryKind::Area => Tool::Area });
+							canvas.set_tool(match kind { CategoryKind::Count => Tool::Count, CategoryKind::Length => Tool::Length, CategoryKind::Area => if matches!(canvas.tool, Tool::Fill | Tool::RectArea | Tool::Volume) { canvas.tool } else { Tool::Area } });
 							self.renaming = Some((id, name));
 							ui.close();
 						}

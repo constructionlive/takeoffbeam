@@ -169,6 +169,9 @@ pub struct OpenDoc {
 	/// Lines followed in the page's picture, by (page, ends); None = no line.
 	traced: HashMap<(u32, [u64; 4]), Option<Vec<Point>>>,
 	traced_requested: HashSet<(u32, [u64; 4])>,
+	/// Fills asked of the worker, by token, once done.
+	filled: HashMap<u64, Option<Result<takeoff_pdf::fill::Fill, takeoff_pdf::fill::NoFill>>>,
+	fill_seq: u64,
 	/// Graph view card images, by key.
 	pub crops: HashMap<String, TextureHandle>,
 	crops_requested: HashSet<String>,
@@ -228,6 +231,8 @@ impl OpenDoc {
 			crops_requested: HashSet::new(),
 			traced: HashMap::new(),
 			traced_requested: HashSet::new(),
+			filled: HashMap::new(),
+			fill_seq: 0,
 		})
 	}
 
@@ -310,6 +315,9 @@ impl OpenDoc {
 					self.traced.insert(trace_key(page, a, b), run);
 					changed = true;
 				}
+				Res::Fill { token, fill } => {
+					self.filled.insert(token, fill);
+				}
 				Res::Segments { page, segments } => {
 					let (w, h) = self.page_size(page);
 					self.snap = Some((page, Arc::new(SnapIndex::new(segments, w, h))));
@@ -358,6 +366,28 @@ impl OpenDoc {
 			self.worker.send(Req::Trace { page: self.page, a, b });
 		}
 		None
+	}
+
+	/// Ask for the space around `at` on this page to be filled; the token to
+	/// collect it with [`OpenDoc::take_fill`]. Openings tried are real door
+	/// widths when the page has a scale.
+	pub fn request_fill(&mut self, at: Vec<Point>) -> u64 {
+		let (w, h) = self.page_size(self.page);
+		let pt_per_m = {
+			let d = self.doc.lock();
+			at.first().and_then(|p| d.data.scale_at(self.page, *p)).and_then(|s| {
+				let upp = takeoff_core::geometry::scale_units_per_px(s, w, h)?;
+				takeoff_core::units::length_factor("m", &s.unit).map(|f| f / upp)
+			})
+		};
+		self.fill_seq += 1;
+		self.worker.send(Req::Fill { token: self.fill_seq, page: self.page, at, gaps: takeoff_pdf::fill::gaps(pt_per_m) });
+		self.fill_seq
+	}
+
+	/// The fill asked for with `token`, once the worker is done.
+	pub fn take_fill(&mut self, token: u64) -> Option<Option<Result<takeoff_pdf::fill::Fill, takeoff_pdf::fill::NoFill>>> {
+		self.filled.remove(&token)
 	}
 
 	/// A render of `region` of `page` for a graph card, cached under `key`.

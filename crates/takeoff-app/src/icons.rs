@@ -3,6 +3,7 @@
 
 pub const MOUSE_POINTER_2: &str = "\u{e1c2}";
 pub const ROUTE: &str = "\u{e542}";
+pub const PAINT_BUCKET: &str = "\u{e2e5}";
 pub const HAND: &str = "\u{e1d6}";
 pub const ZOOM_IN: &str = "\u{e1b5}";
 pub const ZOOM_OUT: &str = "\u{e1b6}";

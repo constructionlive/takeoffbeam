@@ -53,6 +53,22 @@ coordinate convention.
 
 Open the same PDF in Takeoff Desk to see and confirm what the agent marked.
 
+## Claude Code
+
+The repo is a Claude Code plugin marketplace, so the same tools are two commands away in a
+terminal:
+
+```
+/plugin marketplace add constructionlive/takeoffbeam
+/plugin install takeoff-beam@takeoffbeam
+```
+
+Then `/takeoff-beam:takeoff ~/Plans/E-201.pdf count the duplex receptacles on page 2`, or just
+mention a drawing: the plugin's `takeoff` skill knows to set and check the scale first, zoom
+before marking, sweep in tiles and report from `summary`. The plugin starts `takeoff mcp`
+through `claude-plugin/scripts/takeoff-mcp.js`, which finds the binary inside the installed app
+(or on `PATH`, or at `TAKEOFF_BIN`). See [claude-plugin/README.md](../claude-plugin/README.md).
+
 ## Serving pages to an app
 
 `takeoff serve plan.pdf` keeps one drawing open and renders pages, or tiles of them, on request:

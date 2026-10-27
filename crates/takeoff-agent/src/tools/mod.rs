@@ -413,6 +413,7 @@ pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, St
 		"find_items_at" => items::find_items_at(ctx, parse(name, args)?),
 		"add_marks" => items::add_marks(ctx, parse(name, args)?),
 		"add_measurements" => items::add_measurements(ctx, parse(name, args)?),
+		"fill_area" => items::fill_area(ctx, parse(name, args)?),
 		"update_items" => items::update_items(ctx, parse(name, args)?),
 		"delete_items" => items::delete_items(ctx, parse(name, args)?),
 		"create_category" => items::create_category(ctx, parse(name, args)?),

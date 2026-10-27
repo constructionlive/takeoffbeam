@@ -110,6 +110,7 @@ reads positions off a numbered **view** (`v3`) and the tools convert them.
 | `trace` | Trace polylines/polygons with vision |
 | `read_text` / `search_text` | The PDF's own text with positions |
 | `set_hidden_layers` | Layer visibility (shared with you) |
+| `fill_area` | Measure a space by a point inside it: the outline the drawn lines make around it, doorways closed (vector and scanned sheets). Several points fill together as one area |
 | `follow_line` | Measure a whole connected run from one point |
 | `set_viewport` | Show where it's looking |
 | `switch_drawing` | Move its tools to another open drawing (tab) |
