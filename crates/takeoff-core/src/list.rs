@@ -1,5 +1,5 @@
 //! The Markups List: one row per item with Bluebeam-style columns, plus the
-//! per-item summary (counts, totals, cost) and CSV export of both.
+//! per-item summary (counts, totals, cost) and CSV and Excel export of both.
 
 use std::collections::BTreeMap;
 
@@ -268,6 +268,86 @@ pub fn summary(doc: &Document) -> Vec<SummaryLine> {
 	out
 }
 
+/// One exported cell: CSV writes it as text, Excel as a typed cell.
+#[derive(Debug, Clone, PartialEq)]
+enum Cell {
+	Text(String),
+	Num(f64),
+	/// Two decimals in CSV, `#,##0.00` in Excel.
+	Money(f64),
+	Empty,
+}
+
+impl Cell {
+	fn text(s: impl Into<String>) -> Self {
+		let s = s.into();
+		if s.is_empty() { Cell::Empty } else { Cell::Text(s) }
+	}
+	fn csv(&self) -> String {
+		match self {
+			Cell::Text(s) => s.clone(),
+			Cell::Num(v) => format!("{v}"),
+			Cell::Money(v) => format!("{v:.2}"),
+			Cell::Empty => String::new(),
+		}
+	}
+}
+
+const ROW_HEADER: [&str; 15] = ["Page", "Type", "Subject", "#", "Label", "Quantity", "Value", "Unit", "Extra", "Author", "Date", "Status", "Layer", "Source", "Note"];
+const SUMMARY_HEADER: [&str; 9] = ["Item", "Type", "Count", "Quantity", "Unit", "Volume", "Unit cost", "Cost", "Note"];
+
+/// The Markups List as a header and cells, custom columns included: what both exports write.
+fn row_table(doc: &Document, rows: &[MarkupRow]) -> (Vec<String>, Vec<Vec<Cell>>) {
+	let custom = &doc.data.custom_fields;
+	let mut header: Vec<String> = ROW_HEADER.iter().map(|s| s.to_string()).collect();
+	header.extend(custom.iter().map(|f| f.name.clone()));
+	let body = rows
+		.iter()
+		.map(|r| {
+			let mut cells = vec![
+				Cell::Num(r.page as f64),
+				Cell::text(r.kind.label()),
+				Cell::text(r.subject.clone()),
+				r.number.map(|n| Cell::Num(n as f64)).unwrap_or(Cell::Empty),
+				Cell::text(r.label.clone()),
+				Cell::text(r.quantity.clone()),
+				r.value.map(Cell::Num).unwrap_or(Cell::Empty),
+				Cell::text(r.unit.clone()),
+				Cell::text(r.extra.clone()),
+				Cell::text(r.author.clone()),
+				Cell::text(r.date.clone()),
+				Cell::text(r.status.clone()),
+				Cell::text(r.layer.clone()),
+				Cell::text(r.source),
+				Cell::text(r.note.clone()),
+			];
+			cells.extend(custom.iter().map(|f| Cell::text(r.fields.get(&f.id).cloned().unwrap_or_default())));
+			cells
+		})
+		.collect();
+	(header, body)
+}
+
+fn summary_table(lines: &[SummaryLine]) -> (Vec<String>, Vec<Vec<Cell>>) {
+	let body = lines
+		.iter()
+		.map(|l| {
+			vec![
+				Cell::text(l.name.clone()),
+				Cell::text(format!("{:?}", l.kind)),
+				Cell::Num(l.items as f64),
+				Cell::Num(l.total),
+				Cell::text(l.unit.clone()),
+				l.volume.map(Cell::Num).unwrap_or(Cell::Empty),
+				l.unit_cost.map(Cell::Money).unwrap_or(Cell::Empty),
+				l.cost.map(Cell::Money).unwrap_or(Cell::Empty),
+				Cell::text(l.warning.clone().unwrap_or_default()),
+			]
+		})
+		.collect();
+	(SUMMARY_HEADER.iter().map(|s| s.to_string()).collect(), body)
+}
+
 fn csv_cell(s: &str) -> String {
 	if s.contains([',', '"', '\n', '\r']) {
 		format!("\"{}\"", s.replace('"', "\"\""))
@@ -280,60 +360,82 @@ fn csv_line(cells: &[String]) -> String {
 	cells.iter().map(|c| csv_cell(c)).collect::<Vec<_>>().join(",")
 }
 
-/// Markups List as CSV, custom columns included.
-pub fn rows_csv(doc: &Document, rows: &[MarkupRow]) -> String {
-	let custom = &doc.data.custom_fields;
-	let mut header: Vec<String> =
-		["Page", "Type", "Subject", "#", "Label", "Quantity", "Value", "Unit", "Extra", "Author", "Date", "Status", "Layer", "Source", "Note"]
-			.iter()
-			.map(|s| s.to_string())
-			.collect();
-	header.extend(custom.iter().map(|f| f.name.clone()));
+fn table_csv((header, body): (Vec<String>, Vec<Vec<Cell>>)) -> String {
 	let mut out = csv_line(&header);
-	for r in rows {
-		let mut cells = vec![
-			r.page.to_string(),
-			r.kind.label().to_string(),
-			r.subject.clone(),
-			r.number.map(|n| n.to_string()).unwrap_or_default(),
-			r.label.clone(),
-			r.quantity.clone(),
-			r.value.map(|v| format!("{v}")).unwrap_or_default(),
-			r.unit.clone(),
-			r.extra.clone(),
-			r.author.clone(),
-			r.date.clone(),
-			r.status.clone(),
-			r.layer.clone(),
-			r.source.to_string(),
-			r.note.clone(),
-		];
-		cells.extend(custom.iter().map(|f| r.fields.get(&f.id).cloned().unwrap_or_default()));
+	for cells in body {
 		out.push('\n');
-		out.push_str(&csv_line(&cells));
+		out.push_str(&csv_line(&cells.iter().map(Cell::csv).collect::<Vec<_>>()));
 	}
 	out.push('\n');
 	out
 }
 
+/// Markups List as CSV, custom columns included.
+pub fn rows_csv(doc: &Document, rows: &[MarkupRow]) -> String {
+	table_csv(row_table(doc, rows))
+}
+
 pub fn summary_csv(lines: &[SummaryLine]) -> String {
-	let mut out = csv_line(&["Item", "Type", "Count", "Quantity", "Unit", "Volume", "Unit cost", "Cost", "Note"].map(String::from));
-	for l in lines {
-		out.push('\n');
-		out.push_str(&csv_line(&[
-			l.name.clone(),
-			format!("{:?}", l.kind),
-			l.items.to_string(),
-			format!("{}", l.total),
-			l.unit.clone(),
-			l.volume.map(|v| format!("{v}")).unwrap_or_default(),
-			l.unit_cost.map(|v| format!("{v:.2}")).unwrap_or_default(),
-			l.cost.map(|v| format!("{v:.2}")).unwrap_or_default(),
-			l.warning.clone().unwrap_or_default(),
-		]));
+	table_csv(summary_table(lines))
+}
+
+fn xlsx_err(e: rust_xlsxwriter::XlsxError) -> String {
+	format!("couldn't write the workbook: {e}")
+}
+
+/// One sheet: bold header row frozen at the top, then the cells, typed. `total` adds a bold
+/// last row with that label and the sum of the money in column `total.1`.
+fn xlsx_sheet(wb: &mut rust_xlsxwriter::Workbook, name: &str, (header, body): (Vec<String>, Vec<Vec<Cell>>), total: Option<(&str, u16)>) -> Result<(), String> {
+	use rust_xlsxwriter::Format;
+	let bold = Format::new().set_bold();
+	let money = Format::new().set_num_format("#,##0.00");
+	let ws = wb.add_worksheet().set_name(name).map_err(xlsx_err)?;
+	for (c, h) in header.iter().enumerate() {
+		ws.write_string_with_format(0, c as u16, h, &bold).map_err(xlsx_err)?;
 	}
-	out.push('\n');
-	out
+	let mut sum = None::<f64>;
+	for (r, cells) in body.iter().enumerate() {
+		let r = r as u32 + 1;
+		for (c, cell) in cells.iter().enumerate() {
+			let c = c as u16;
+			match cell {
+				Cell::Text(s) => ws.write_string(r, c, s).map(|_| ()),
+				Cell::Num(v) => ws.write_number(r, c, *v).map(|_| ()),
+				Cell::Money(v) => {
+					if total.is_some_and(|t| t.1 == c) {
+						*sum.get_or_insert(0.0) += v;
+					}
+					ws.write_number_with_format(r, c, *v, &money).map(|_| ())
+				}
+				Cell::Empty => Ok(()),
+			}
+			.map_err(xlsx_err)?;
+		}
+	}
+	if let (Some((label, col)), Some(sum)) = (total, sum) {
+		let r = body.len() as u32 + 1;
+		ws.write_string_with_format(r, 0, label, &bold).map_err(xlsx_err)?;
+		ws.write_number_with_format(r, col, sum, &money.set_bold()).map_err(xlsx_err)?;
+	}
+	ws.set_freeze_panes(1, 0).map_err(xlsx_err)?;
+	ws.autofit();
+	Ok(())
+}
+
+/// Markups List as an Excel workbook: a *Markups* sheet with the CSV's columns and a *Summary*
+/// sheet with the quantity summary's. Pages, numbers, values, counts and costs are numbers.
+pub fn rows_xlsx(doc: &Document, rows: &[MarkupRow]) -> Result<Vec<u8>, String> {
+	let mut wb = rust_xlsxwriter::Workbook::new();
+	xlsx_sheet(&mut wb, "Markups", row_table(doc, rows), None)?;
+	xlsx_sheet(&mut wb, "Summary", summary_table(&summary(doc)), Some(("Total", 7)))?;
+	wb.save_to_buffer().map_err(xlsx_err)
+}
+
+/// Quantity summary as an Excel workbook, one sheet, with a total cost row when items have costs.
+pub fn summary_xlsx(lines: &[SummaryLine]) -> Result<Vec<u8>, String> {
+	let mut wb = rust_xlsxwriter::Workbook::new();
+	xlsx_sheet(&mut wb, "Summary", summary_table(lines), Some(("Total", 7)))?;
+	wb.save_to_buffer().map_err(xlsx_err)
 }
 
 #[cfg(test)]
@@ -370,5 +472,73 @@ mod tests {
 		let csv = rows_csv(&doc, &rows(&doc));
 		assert!(csv.contains("\"Duplex, 20A\""));
 		assert_eq!(csv.lines().count(), 4);
+	}
+
+	fn doc_with_costs() -> Document {
+		let mut data = TakeoffData::default();
+		let mut c = Category::new("c1", "Duplex, 20A", "#4CC2FF", CategoryKind::Count);
+		c.unit_cost = Some(12.5);
+		data.categories.push(c);
+		data.custom_fields.push(FieldDef { id: "f1".into(), name: "Circuit".into() });
+		for i in 0..2 {
+			data.marks.push(Mark {
+				id: format!("m{i}"),
+				category_id: Some("c1".into()),
+				page: 2,
+				x: 0.1 * i as f64,
+				y: 0.1,
+				w: 0.01,
+				h: 0.01,
+				source: Source::User,
+				status: MarkStatus::Confirmed,
+				tile: None,
+				note: Some("by the door".into()),
+				fields: Some([("f1".to_string(), "L1-3".to_string())].into()),
+				meta: Default::default(),
+			});
+		}
+		Document::new(data, vec![(1000.0, 500.0), (1000.0, 500.0)], "me")
+	}
+
+	#[test]
+	fn xlsx_matches_csv_with_typed_cells() {
+		use calamine::{Data, Reader, Xlsx};
+		let doc = doc_with_costs();
+		let buf = rows_xlsx(&doc, &rows(&doc)).unwrap();
+		let mut wb: Xlsx<_> = Xlsx::new(std::io::Cursor::new(buf)).unwrap();
+		assert_eq!(wb.sheet_names(), vec!["Markups".to_string(), "Summary".to_string()]);
+		let m = wb.worksheet_range("Markups").unwrap();
+		// Same header as the CSV, custom column last.
+		let csv = rows_csv(&doc, &rows(&doc));
+		let header: Vec<String> = (0..m.width()).map(|c| m.get((0, c)).unwrap().to_string()).collect();
+		assert_eq!(header.join(","), csv.lines().next().unwrap());
+		assert_eq!(m.height(), 3);
+		assert_eq!(m.get((1, 0)), Some(&Data::Float(2.0)));
+		assert_eq!(m.get((1, 2)), Some(&Data::String("Duplex, 20A".into())));
+		assert_eq!(m.get((1, 3)), Some(&Data::Float(1.0)));
+		assert_eq!(m.get((2, 3)), Some(&Data::Float(2.0)));
+		assert_eq!(m.get((1, 6)), Some(&Data::Float(1.0)));
+		assert_eq!(m.get((1, 15)), Some(&Data::String("L1-3".into())));
+		let s = wb.worksheet_range("Summary").unwrap();
+		assert_eq!(s.get((1, 2)), Some(&Data::Float(2.0)));
+		assert_eq!(s.get((1, 6)), Some(&Data::Float(12.5)));
+		assert_eq!(s.get((1, 7)), Some(&Data::Float(25.0)));
+		// Total cost row.
+		assert_eq!(s.get((2, 0)), Some(&Data::String("Total".into())));
+		assert_eq!(s.get((2, 7)), Some(&Data::Float(25.0)));
+	}
+
+	#[test]
+	fn summary_xlsx_without_costs_has_no_total() {
+		use calamine::{Data, Reader, Xlsx};
+		let mut doc = doc_with_costs();
+		doc.data.categories[0].unit_cost = None;
+		let buf = summary_xlsx(&summary(&doc)).unwrap();
+		let mut wb: Xlsx<_> = Xlsx::new(std::io::Cursor::new(buf)).unwrap();
+		let s = wb.worksheet_range("Summary").unwrap();
+		assert_eq!(s.height(), 2);
+		assert_eq!(s.get((0, 7)), Some(&Data::String("Cost".into())));
+		assert_eq!(s.get((1, 3)), Some(&Data::Float(2.0)));
+		assert_eq!(s.get((1, 7)), Some(&Data::Empty));
 	}
 }

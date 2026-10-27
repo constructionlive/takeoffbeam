@@ -30,7 +30,7 @@ These links always point at the newest version.
   - Items with colors, hatches, unit costs and a Tool Chest.
 - **Markups:**
   - Text, callouts, clouds, shapes, arrows, highlight, pen and stamps.
-  - A Bluebeam-style Markups List with custom columns and CSV export.
+  - A Bluebeam-style Markups List with custom columns and CSV and Excel export.
 - **PDF tools:**
   - Split, merge, extract, insert, rotate, delete and reorder pages. The takeoff follows its
     pages.
@@ -71,7 +71,7 @@ See the [docs](docs/README.md):
 
 | Crate | |
 |---|---|
-| `takeoff-core` | Data model, geometry, numbering, snapping, coordinate dialects, undo, CSV, sidecar |
+| `takeoff-core` | Data model, geometry, numbering, snapping, coordinate dialects, undo, CSV and Excel, sidecar |
 | `takeoff-pdf` | pdfium rendering, text, layers, vectors, page tools, burn-in, flattened export |
 | `takeoff-models` | GGUF reader, memory-fit check, model catalog, downloads, llama-server |
 | `takeoff-cloud` | construction.live sign-in and cloud models |

@@ -31,7 +31,12 @@ Preferences → llama-server at a `llama-server` binary.
 ## Open a drawing
 
 *File → Open* (⌘O), drop PDFs on the window, or pick a recent file on the start screen. Each
-drawing opens in a tab. Your takeoff is saved automatically, about a second after each change, to
+drawing opens in a tab.
+
+From Finder or Explorer, right-click a PDF and choose *Open With → Takeoff Desk*; the installer
+adds it there without making it your default PDF app (set that yourself if you want
+double-click). On macOS a PDF sent while the app is running opens as a new tab. On Windows each
+file starts its own window. `takeoff-desk plan.pdf` opens a drawing from a terminal. Your takeoff is saved automatically, about a second after each change, to
 `<drawing>.pdf.takeoff.json` next to the PDF. The status bar shows **Saved**.
 
 ![Start screen](images/dark-start.png)

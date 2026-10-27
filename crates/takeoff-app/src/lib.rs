@@ -3,6 +3,7 @@
 pub mod ai_panel;
 pub mod app;
 pub mod canvas;
+pub mod crash;
 pub mod docstate;
 pub mod geom;
 pub mod graph_view;
@@ -10,6 +11,7 @@ pub mod icons;
 pub mod left_panel;
 pub mod map_panel;
 pub mod markups;
+pub mod open_files;
 pub mod right_panel;
 pub mod settings;
 pub mod theme;

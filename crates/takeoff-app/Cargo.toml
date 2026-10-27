@@ -23,6 +23,7 @@ image.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 dirs.workspace = true
+sysinfo.workspace = true
 reqwest.workspace = true
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "persistence", "x11", "wayland"] }
 egui_extras = { version = "0.35", default-features = false }
@@ -30,6 +31,11 @@ rfd = "0.15"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 earcutr = "0.4"
 open = "5"
+
+# Finder's "open this PDF" Apple Events: our own event loop, so we can hook winit's app delegate.
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = { version = "0.30", default-features = false }
+objc2 = "0.5"
 
 [dev-dependencies]
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }

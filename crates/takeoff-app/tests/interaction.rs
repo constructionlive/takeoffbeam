@@ -513,3 +513,29 @@ fn ai_header_buttons_do_not_overlap_the_picker() {
 	assert!(picker.top() < 200.0, "the header stays at the top of the panel: {picker:?}");
 	assert!(picker.height() <= 44.0, "one row: {picker:?}");
 }
+
+/// Last session's crash report: a corner notice that Dismiss archives; Help has the log items.
+#[test]
+fn crash_notice_dismisses_and_help_has_logs() {
+	let dir = std::env::temp_dir().join(format!("takeoff-ui-crash-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&dir);
+	takeoff_app::crash::write(&dir, &takeoff_app::crash::report("boom 42", "a.rs:1:1", "main", "0: x")).unwrap();
+	let mut h = harness();
+	pump(&mut h, 2);
+	let report = takeoff_app::crash::pending(&dir).unwrap();
+	app(&mut h).offer_crash_report(report, dir.clone());
+	pump(&mut h, 3);
+	assert!(h.query_by_label_contains("closed unexpectedly").is_some());
+	assert!(h.query_by_label_contains("boom 42").is_some());
+	let r = h.get_by_label("Dismiss").rect().center();
+	click(&mut h, r);
+	assert!(h.query_by_label_contains("closed unexpectedly").is_none());
+	assert!(takeoff_app::crash::pending(&dir).is_none(), "dismissed report is archived");
+	assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+	let _ = std::fs::remove_dir_all(&dir);
+
+	let help = h.get_by_label("Help").rect().center();
+	click(&mut h, help);
+	assert!(h.query_by_label_contains("Copy diagnostics").is_some());
+	assert!(h.query_by_label_contains("Show logs").is_some());
+}

@@ -57,4 +57,6 @@ sets). Toggle them with the eye icons, or use the filter, *Show all* and *Hide a
   content, so any viewer or printer shows them. Badges, values and labels are included.
 - **Page image (PNG):** the current page at 200 DPI with markups.
 - **Markups list / Quantity summary (CSV).**
+- **Markups list + summary / Quantity summary (Excel):** the same columns as the CSVs, as an
+  `.xlsx` with numbers as numbers.
 - **Takeoff file (JSON):** the sidecar, for construction.live or your own tools.

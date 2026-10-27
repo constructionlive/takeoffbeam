@@ -2,7 +2,7 @@
 
 ```
 takeoff-core     model, geometry, numbering, page remap, snap engine, coordinate dialects,
-                 document store (undo/redo), markups list + CSV, sidecar I/O, the document
+                 document store (undo/redo), markups list + CSV/Excel, sidecar I/O, the document
                  map (sheets, areas, links)                                          — no I/O deps
 takeoff-pdf      pdfium: render page/region, text + search, bookmarks, vectors; own lazy PDF
                  object reader for layers; page tools + takeoff-aware ops; burn-in; flattened export
@@ -14,6 +14,11 @@ takeoff-agent    OpenAI-compatible streaming client, the agent loop (with parall
 takeoff-app      egui desktop app
 takeoff-cli      `takeoff` CLI and the MCP server
 ```
+
+**Opening files.** `main.rs` opens PDFs given as arguments (Windows "Open with", the command
+line). On macOS Finder sends Apple Events instead, which winit drops, so the app builds its own
+event loop and adds `application:openURLs:` to winit's app delegate before running it
+(`open_files.rs`); the paths queue up and the next frame opens them like dropped files.
 
 **Threads in the app.**
 - The UI thread owns the egui state.

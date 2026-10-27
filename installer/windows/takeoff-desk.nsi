@@ -79,11 +79,17 @@ Section "Takeoff Desk" SecMain
   WriteRegStr SHCTX "${UNINST}" "URLInfoAbout" "https://construction.live"
   WriteRegDWORD SHCTX "${UNINST}" "NoModify" 1
   WriteRegDWORD SHCTX "${UNINST}" "NoRepair" 1
-  ; "Open with" for PDFs (doesn't take over the default PDF app).
+  ; "Open with" for PDFs (doesn't take over the default PDF app). SHCTX is HKCU or HKLM to
+  ; match the install mode. Each file Explorer opens starts takeoff-desk.exe "<file>".
   WriteRegStr SHCTX "Software\Classes\TakeoffDesk.pdf" "" "PDF drawing (Takeoff Desk)"
   WriteRegStr SHCTX "Software\Classes\TakeoffDesk.pdf\DefaultIcon" "" "$INSTDIR\takeoff-desk.exe,0"
   WriteRegStr SHCTX "Software\Classes\TakeoffDesk.pdf\shell\open\command" "" '"$INSTDIR\takeoff-desk.exe" "%1"'
   WriteRegStr SHCTX "Software\Classes\.pdf\OpenWithProgids" "TakeoffDesk.pdf" ""
+  ; Lists the app by name under "Open with → Choose another app".
+  WriteRegStr SHCTX "Software\Classes\Applications\takeoff-desk.exe" "FriendlyAppName" "Takeoff Desk"
+  WriteRegStr SHCTX "Software\Classes\Applications\takeoff-desk.exe\SupportedTypes" ".pdf" ""
+  WriteRegStr SHCTX "Software\Classes\Applications\takeoff-desk.exe\shell\open\command" "" '"$INSTDIR\takeoff-desk.exe" "%1"'
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
   CreateDirectory "$SMPROGRAMS\Takeoff Desk"
   CreateShortcut "$SMPROGRAMS\Takeoff Desk\Takeoff Desk.lnk" "$INSTDIR\takeoff-desk.exe"
   CreateShortcut "$DESKTOP\Takeoff Desk.lnk" "$INSTDIR\takeoff-desk.exe"
@@ -95,6 +101,8 @@ Section "Uninstall"
   RMDir /r "$SMPROGRAMS\Takeoff Desk"
   DeleteRegKey SHCTX "Software\Classes\TakeoffDesk.pdf"
   DeleteRegValue SHCTX "Software\Classes\.pdf\OpenWithProgids" "TakeoffDesk.pdf"
+  DeleteRegKey SHCTX "Software\Classes\Applications\takeoff-desk.exe"
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
   DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\TakeoffDesk"
   DeleteRegKey SHCTX "Software\Takeoff Desk"
   RMDir /r "$INSTDIR"

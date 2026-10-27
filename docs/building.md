@@ -108,3 +108,15 @@ into Downloads and opens it. It also has *What's new*, *Later* and *Skip this ve
 *Feedback* (top right, or *Help → Send feedback…*) opens the user's email app with a message to
 rahul@construction.live. The subject and body are pre-filled with the version, OS and the model
 in use.
+
+## Crash reports
+
+If the app panics, a hook writes a report (message, file and line, thread, backtrace, version,
+OS) to `crash.txt` in the logs folder: `~/Library/Application Support/Takeoff Desk/logs` on
+macOS, `%APPDATA%\Takeoff Desk\logs` on Windows. On the next start a small notice in the
+bottom-right corner offers *Send report…*, which opens the same Feedback email with the head of
+the report in it and the file's path to attach, or *Dismiss*. Either way the report is renamed
+`crash-<time>.txt` and kept. Nothing is sent unless the user clicks.
+
+*Help → Copy diagnostics* puts the version, OS, model, logs folder and the last crash on the
+clipboard; *Help → Show logs* opens the folder.

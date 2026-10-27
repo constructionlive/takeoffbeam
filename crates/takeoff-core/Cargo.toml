@@ -11,6 +11,10 @@ authors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+rust_xlsxwriter = { version = "0.101", default-features = false }
+
+[dev-dependencies]
+calamine = "0.37"
 
 [lints]
 workspace = true

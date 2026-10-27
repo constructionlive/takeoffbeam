@@ -18,6 +18,7 @@ takeoff rotate plans.pdf --pages 4-6 --turns 1           # in place, keeps "(ori
 takeoff delete plans.pdf --pages 7
 
 takeoff export plans.pdf --pdf-out marked.pdf --csv markups.csv --summary quantities.csv
+takeoff export plans.pdf --xlsx takeoff.xlsx             # markups + summary sheets
 
 takeoff models list                                      # installed models + memory fit
 takeoff models catalog --context 65536

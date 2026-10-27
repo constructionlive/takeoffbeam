@@ -53,6 +53,8 @@ pub struct TakeoffApp {
 	pdf_edits_confirmed: bool,
 	updater: Updater,
 	notes_open: bool,
+	/// A crash report from last time and its logs folder, offered until sent or dismissed.
+	crash: Option<(String, PathBuf)>,
 }
 
 impl TakeoffApp {
@@ -75,6 +77,7 @@ impl TakeoffApp {
 			pdf_edits_confirmed: false,
 			updater: Updater::new(),
 			notes_open: false,
+			crash: None,
 		};
 		app.apply_theme(ctx);
 		app.canvas.show_badges = app.settings.show_badges;
@@ -111,6 +114,11 @@ impl TakeoffApp {
 		}
 	}
 
+	/// Offer last session's crash report (`crash::pending(dir)`) in a corner notice.
+	pub fn offer_crash_report(&mut self, report: String, dir: PathBuf) {
+		self.crash = Some((report, dir));
+	}
+
 	fn toast(&mut self, msg: impl Into<String>, error: bool) {
 		self.toast = Some((msg.into(), Instant::now(), error));
 	}
@@ -144,8 +152,9 @@ impl TakeoffApp {
 		self.apply_theme(&ctx);
 		let p = theme::palette(&ctx);
 
-		// Dropped files.
-		let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+		// Dropped files, and files Finder sent (double-click, Open With).
+		let mut dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+		dropped.extend(crate::open_files::take());
 		let mut images = Vec::new();
 		for f in dropped {
 			if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
@@ -196,6 +205,7 @@ impl TakeoffApp {
 		}
 		self.dialogs(&ctx, &p);
 		self.ai.models_window(&ctx, &mut self.settings, &p);
+		self.crash_notice(&ctx, &p);
 		self.toasts(&ctx, &p);
 	}
 
@@ -436,6 +446,14 @@ impl TakeoffApp {
 					ui.close();
 					self.export_csv(true);
 				}
+				if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Markups list + summary (Excel)…", i::FILE_SPREADSHEET))).clicked() {
+					ui.close();
+					self.export_xlsx(false);
+				}
+				if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Quantity summary (Excel)…", i::SIGMA))).clicked() {
+					ui.close();
+					self.export_xlsx(true);
+				}
 				if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Takeoff file (JSON)…", i::DOWNLOAD))).clicked() {
 					ui.close();
 					self.export_json();
@@ -574,6 +592,15 @@ impl TakeoffApp {
 				ui.close();
 				self.send_feedback();
 			}
+			if ui.button(format!("{}  Copy diagnostics", i::COPY)).on_hover_text("Version, OS, model and the last crash, for a bug report").clicked() {
+				ui.close();
+				ctx.copy_text(crate::crash::diagnostics(&self.settings.model));
+				self.toast("Copied diagnostics", false);
+			}
+			if ui.button(format!("{}  Show logs", i::FOLDER_OPEN)).on_hover_text("The folder with crash reports").clicked() {
+				ui.close();
+				self.show_logs();
+			}
 			if ui.button(format!("{}  Check for updates…", i::REFRESH_CW)).clicked() {
 				ui.close();
 				self.updater.manual = true;
@@ -667,6 +694,7 @@ impl TakeoffApp {
 			match action {
 				Some(ListAction::ExportCsv) => self.export_csv(false),
 				Some(ListAction::ExportSummary) => self.export_csv(true),
+				Some(ListAction::ExportXlsx) => self.export_xlsx(false),
 				None => {}
 			}
 		}
@@ -1738,6 +1766,21 @@ impl TakeoffApp {
 		}
 	}
 
+	/// Excel: the markups list with a Summary sheet, or the summary alone.
+	fn export_xlsx(&mut self, summary: bool) {
+		let Some(d) = self.docs.get(self.active) else { return };
+		let stem = d.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+		let name = if summary { format!("{stem} quantities.xlsx") } else { format!("{stem} markups.xlsx") };
+		let Some(dst) = rfd::FileDialog::new().set_file_name(name).add_filter("Excel workbook", &["xlsx"]).save_file() else { return };
+		let doc = d.doc.lock();
+		let xlsx = if summary { takeoff_core::list::summary_xlsx(&takeoff_core::list::summary(&doc)) } else { takeoff_core::list::rows_xlsx(&doc, &takeoff_core::list::rows(&doc)) };
+		drop(doc);
+		match xlsx.and_then(|b| std::fs::write(&dst, b).map_err(|e| e.to_string())) {
+			Ok(()) => self.toast("Exported Excel workbook", false),
+			Err(e) => self.toast(e, true),
+		}
+	}
+
 	fn export_json(&mut self) {
 		let Some(d) = self.docs.get(self.active) else { return };
 		let stem = d.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1753,6 +1796,51 @@ impl TakeoffApp {
 		let url = updates::feedback_mailto(&self.settings.model);
 		if open::that(&url).is_err() {
 			self.toast("No email app found — write to rahul@construction.live", true);
+		}
+	}
+
+	fn show_logs(&mut self) {
+		let dir = crate::crash::log_dir();
+		let _ = std::fs::create_dir_all(&dir);
+		if open::that(&dir).is_err() {
+			self.toast(format!("Logs are in {}", dir.display()), false);
+		}
+	}
+
+	/// Bottom-right, non-blocking: send last session's crash report by email, or let it go.
+	fn crash_notice(&mut self, ctx: &egui::Context, p: &Palette) {
+		let Some((report, dir)) = self.crash.clone() else { return };
+		let (mut send, mut show, mut dismiss) = (false, false, false);
+		egui::Area::new(egui::Id::new("crash-notice")).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -40.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+			egui::Frame::popup(&ctx.global_style()).fill(p.panel).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+				ui.set_max_width(320.0);
+				ui.horizontal(|ui| {
+					ui.label(RichText::new(i::CIRCLE_ALERT).font(theme::icon_font(15.0)).color(p.danger));
+					ui.label(RichText::new("Takeoff Desk closed unexpectedly").font(theme::semibold(13.0)).color(p.text));
+				});
+				let first = report.lines().find(|l| l.starts_with("Panic: ")).unwrap_or("").trim_start_matches("Panic: ");
+				ui.label(RichText::new(format!("A crash report was saved. Send it to the team so we can fix it? Nothing is sent unless you click Send.{}", if first.is_empty() { String::new() } else { format!("\n\n{}", first.chars().take(140).collect::<String>()) })).size(12.0).color(p.text2));
+				ui.add_space(6.0);
+				ui.horizontal(|ui| {
+					send = ui.button(format!("{}  Send report…", i::SEND)).on_hover_text("Opens an email to the team with the report in it").clicked();
+					show = ui.button("Show").on_hover_text("Open the logs folder").clicked();
+					dismiss = ui.button("Dismiss").clicked();
+				});
+			});
+		});
+		if send {
+			let url = updates::crash_mailto(&self.settings.model, &report, &dir.join("crash.txt"));
+			if open::that(&url).is_err() {
+				self.toast("No email app found — write to rahul@construction.live", true);
+				return;
+			}
+		}
+		if show {
+			self.show_logs();
+		}
+		if send || dismiss {
+			crate::crash::archive(&dir);
+			self.crash = None;
 		}
 	}
 
