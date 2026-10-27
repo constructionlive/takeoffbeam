@@ -2,7 +2,7 @@
 
 ```
 takeoff-core     model, geometry, numbering, page remap, snap engine, coordinate dialects,
-                 document store (undo/redo), markups list + CSV, sidecar I/O, the document
+                 document store (undo/redo), markups list + CSV/Excel, sidecar I/O, the document
                  map (sheets, areas, links)                                          — no I/O deps
 takeoff-pdf      pdfium: render page/region, text + search, bookmarks, vectors; own lazy PDF
                  object reader for layers; page tools + takeoff-aware ops; burn-in; flattened export

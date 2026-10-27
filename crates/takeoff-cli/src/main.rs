@@ -105,7 +105,7 @@ enum Cmd {
 		#[arg(long, default_value_t = 1)]
 		turns: u32,
 	},
-	/// Export the takeoff: flattened PDF, markups CSV, quantity summary CSV.
+	/// Export the takeoff: flattened PDF, markups CSV, quantity summary CSV, Excel workbook.
 	Export {
 		pdf: PathBuf,
 		#[arg(long)]
@@ -114,6 +114,9 @@ enum Cmd {
 		csv: Option<PathBuf>,
 		#[arg(long)]
 		summary: Option<PathBuf>,
+		/// Excel workbook: the markups list and the quantity summary, one sheet each.
+		#[arg(long)]
+		xlsx: Option<PathBuf>,
 	},
 	/// Local models: list installed, check memory fit.
 	Models {
@@ -294,10 +297,10 @@ fn run(cli: Cli) -> Result<(), String> {
 			sidecar::save(&pdf, &data).map_err(|e| e.to_string())?;
 			println!("{msg}");
 		}
-		Cmd::Export { pdf, pdf_out, csv, summary } => {
+		Cmd::Export { pdf, pdf_out, csv, summary, xlsx } => {
 			let data = sidecar::load(&pdf).map_err(|e| e.to_string())?;
-			if pdf_out.is_none() && csv.is_none() && summary.is_none() {
-				return Err("say what to export: --pdf-out, --csv and/or --summary".into());
+			if pdf_out.is_none() && csv.is_none() && summary.is_none() && xlsx.is_none() {
+				return Err("say what to export: --pdf-out, --csv, --summary and/or --xlsx".into());
 			}
 			if let Some(o) = pdf_out {
 				let n = takeoff_pdf::export::export_flattened(&pdf, &data, &o).map_err(|e| e.to_string())?;
@@ -312,6 +315,10 @@ fn run(cli: Cli) -> Result<(), String> {
 			}
 			if let Some(o) = summary {
 				std::fs::write(&o, takeoff_core::list::summary_csv(&takeoff_core::list::summary(&doc))).map_err(|e| e.to_string())?;
+				println!("{}", o.display());
+			}
+			if let Some(o) = xlsx {
+				std::fs::write(&o, takeoff_core::list::rows_xlsx(&doc, &takeoff_core::list::rows(&doc))?).map_err(|e| e.to_string())?;
 				println!("{}", o.display());
 			}
 		}

@@ -49,6 +49,7 @@ impl Default for MarkupsList {
 pub enum ListAction {
 	ExportCsv,
 	ExportSummary,
+	ExportXlsx,
 }
 
 impl MarkupsList {
@@ -76,6 +77,9 @@ impl MarkupsList {
 				}
 				if ui.button(format!("{}  Export CSV", i::FILE_SPREADSHEET)).clicked() {
 					action = Some(ListAction::ExportCsv);
+				}
+				if ui.button(format!("{}  Excel", i::FILE_SPREADSHEET)).on_hover_text("The list and the quantity summary as an Excel workbook").clicked() {
+					action = Some(ListAction::ExportXlsx);
 				}
 				ui.menu_button(format!("{}  Columns", i::TABLE), |ui| {
 					widgets::section_label(ui, p, "Custom columns");

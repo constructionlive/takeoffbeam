@@ -110,4 +110,6 @@ columns, and note.
 - **Jump:** click a row to go to the item; double-click to zoom to it.
 - **Custom columns:** add them under *Columns*. Edit the values in Properties.
 - **Export:** *Export CSV* writes the full list; *Summary CSV* writes one line per item (count or
-  total, unit, volume, unit cost, cost).
+  total, unit, volume, unit cost, cost). *Excel* writes both into one `.xlsx`: a *Markups* sheet
+  and a *Summary* sheet with a total cost row. Pages, numbers, values, counts and costs are real
+  numbers, so sums and filters work in Excel.

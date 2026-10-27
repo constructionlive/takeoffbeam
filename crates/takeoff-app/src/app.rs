@@ -436,6 +436,14 @@ impl TakeoffApp {
 					ui.close();
 					self.export_csv(true);
 				}
+				if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Markups list + summary (Excel)…", i::FILE_SPREADSHEET))).clicked() {
+					ui.close();
+					self.export_xlsx(false);
+				}
+				if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Quantity summary (Excel)…", i::SIGMA))).clicked() {
+					ui.close();
+					self.export_xlsx(true);
+				}
 				if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Takeoff file (JSON)…", i::DOWNLOAD))).clicked() {
 					ui.close();
 					self.export_json();
@@ -667,6 +675,7 @@ impl TakeoffApp {
 			match action {
 				Some(ListAction::ExportCsv) => self.export_csv(false),
 				Some(ListAction::ExportSummary) => self.export_csv(true),
+				Some(ListAction::ExportXlsx) => self.export_xlsx(false),
 				None => {}
 			}
 		}
@@ -1735,6 +1744,21 @@ impl TakeoffApp {
 		match std::fs::write(&dst, csv) {
 			Ok(()) => self.toast("Exported CSV", false),
 			Err(e) => self.toast(e.to_string(), true),
+		}
+	}
+
+	/// Excel: the markups list with a Summary sheet, or the summary alone.
+	fn export_xlsx(&mut self, summary: bool) {
+		let Some(d) = self.docs.get(self.active) else { return };
+		let stem = d.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+		let name = if summary { format!("{stem} quantities.xlsx") } else { format!("{stem} markups.xlsx") };
+		let Some(dst) = rfd::FileDialog::new().set_file_name(name).add_filter("Excel workbook", &["xlsx"]).save_file() else { return };
+		let doc = d.doc.lock();
+		let xlsx = if summary { takeoff_core::list::summary_xlsx(&takeoff_core::list::summary(&doc)) } else { takeoff_core::list::rows_xlsx(&doc, &takeoff_core::list::rows(&doc)) };
+		drop(doc);
+		match xlsx.and_then(|b| std::fs::write(&dst, b).map_err(|e| e.to_string())) {
+			Ok(()) => self.toast("Exported Excel workbook", false),
+			Err(e) => self.toast(e, true),
 		}
 	}
 
