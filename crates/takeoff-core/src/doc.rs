@@ -47,15 +47,17 @@ pub struct Document {
 impl Document {
 	pub fn new(mut data: TakeoffData, page_sizes_pt: Vec<(f64, f64)>, author: impl Into<String>) -> Self {
 		crate::normalize::normalize(&mut data);
-		// Pages carry the aspect ratio for platform consumers (px at 200 DPI).
-		data.pages = page_sizes_pt
-			.iter()
-			.enumerate()
-			.map(|(i, (w, h))| PageInfo { page: i as u32 + 1, width_px: (w * 200.0 / 72.0).round(), height_px: (h * 200.0 / 72.0).round() })
-			.collect();
+		data.pages = page_infos(&page_sizes_pt);
 		let mut doc = Self { data, page_sizes_pt, author: author.into(), undo: vec![], redo: vec![], revision: 0, saved_revision: 0, gesture: false };
 		doc.recompute();
 		doc
+	}
+
+	/// The PDF was read (again): new page sizes, same takeoff and undo history.
+	pub fn set_page_sizes(&mut self, page_sizes_pt: Vec<(f64, f64)>) {
+		self.data.pages = page_infos(&page_sizes_pt);
+		self.page_sizes_pt = page_sizes_pt;
+		self.recompute();
 	}
 
 	pub fn revision(&self) -> u64 {
@@ -173,6 +175,11 @@ impl Document {
 		let at = m.points.first().copied().unwrap_or(Point { x: 0.5, y: 0.5 });
 		measurement_quantity(m, self.data.scale_at(m.page, at), w, h)
 	}
+}
+
+/// Pages carry the aspect ratio for platform consumers (px at 200 DPI).
+fn page_infos(sizes: &[(f64, f64)]) -> Vec<PageInfo> {
+	sizes.iter().enumerate().map(|(i, (w, h))| PageInfo { page: i as u32 + 1, width_px: (w * 200.0 / 72.0).round(), height_px: (h * 200.0 / 72.0).round() }).collect()
 }
 
 impl TakeoffData {
@@ -312,6 +319,24 @@ mod tests {
 		assert!(d.redo() && d.redo());
 		assert_eq!(d.data.measurements.len(), 1);
 		assert_eq!(d.undo_label(), Some("line"));
+	}
+
+	#[test]
+	fn reloading_the_pdf_keeps_undo() {
+		let mut d = doc();
+		d.edit("Slip-sheet", |t| {
+			t.page_scales.push(PageScale { page: 1, p1: Point { x: 0.0, y: 0.0 }, p2: Point { x: 0.1, y: 0.0 }, distance: 10.0, unit: "ft".into() });
+			t.measurements.push(Measurement::new("ms_1", 1, MeasurementType::Length, vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.2, y: 0.0 }]));
+			t.pdf_state = 7;
+		});
+		d.set_page_sizes(vec![(2000.0, 500.0), (612.0, 792.0)]);
+		assert_eq!((d.page_count(), d.data.pages.len()), (2, 2));
+		assert!((d.data.measurements[0].value.unwrap() - 20.0).abs() < 1e-9, "fractions of the page: same length on bigger paper");
+		assert_eq!(d.undo_label(), Some("Slip-sheet"));
+		d.undo();
+		assert_eq!((d.data.pdf_state, d.data.measurements.len()), (0, 0));
+		d.redo();
+		assert_eq!(d.data.pdf_state, 7);
 	}
 
 	#[test]

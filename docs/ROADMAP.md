@@ -116,6 +116,9 @@ Decided 2026-10-14:
 - **Agent:** see `crates/takeoff-agent`. Typed tools, streaming loop, image injection, vision
   pipelines, a live run on local Qwen3.8 27B.
 - **CLI + MCP server.**
+- **Slip-sheets and sets** (2026-10-27): sheet numbers from title blocks, labels, bookmarks and
+  the map; review, carry-over (fitted on other paper), history PDFs, items on changes, undo that
+  restores the PDF; set files, the Set tab, the project takeoff.
 - **macOS packaging:** a 46 MB dmg with pdfium, llama-server and the CLI; ad-hoc or Developer ID
   signing; optional notarization.
 
@@ -124,6 +127,11 @@ Decided 2026-10-14:
 - **Windows and Linux installers.** CI already builds and tests on Linux.
 - [x] **Continuous-scroll page view and two-page spreads.** Done: *View → Page layout* (⌘4–⌘7).
 - **Auto area:** click inside a closed region.
-- **Spaces, markup legends, sets/slip-sheets.**
+- **Spaces, markup legends.**
+- **Slip-sheets, more:** match on the AI's title-block reading when a sheet has no text layer;
+  carry the document map across; a revision list per sheet (not just the latest) in Compare;
+  clean up `plan.pdf.revisions/` files an undone slip-sheet left behind.
+- **Sets, more:** reorder and rename drawings in the Set tab; search, the map and the AI across a
+  whole set.
 - **"Send to construction.live":** upload the takeoff into a project register.
 - **Opening PDFs from Finder** (Apple Events) as well as drag-drop and the Open dialog.

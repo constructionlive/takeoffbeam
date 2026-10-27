@@ -6,6 +6,7 @@
 //! without rasterizing the rest of the sheet.
 
 pub mod burn;
+pub mod compare;
 pub mod cos;
 pub mod export;
 pub mod fill;
@@ -14,6 +15,8 @@ pub mod ops;
 pub mod outline;
 pub mod overlay;
 pub mod search;
+pub mod sheets;
+pub mod slip;
 pub mod tools;
 pub mod trace;
 pub mod vectors;

@@ -24,6 +24,8 @@ use crate::tools::Tool;
 use crate::updates::{self, DownloadState, Updater};
 use crate::widgets;
 
+mod sets;
+
 enum Dialog {
 	Calibrate { page: u32, p1: Point, p2: Point, text: String, unit: String, error: Option<String>, all_pages: bool },
 	Viewport { page: u32, rect: (f64, f64, f64, f64), name: String, preset: usize },
@@ -55,6 +57,10 @@ pub struct TakeoffApp {
 	notes_open: bool,
 	/// A crash report from last time and its logs folder, offered until sent or dismissed.
 	crash: Option<(String, PathBuf)>,
+	/// The open set of drawings, if any.
+	set: Option<crate::set_panel::OpenSet>,
+	/// A slip-sheet being reviewed or applied.
+	slip: Option<crate::slipsheet::SlipReview>,
 }
 
 impl TakeoffApp {
@@ -78,6 +84,8 @@ impl TakeoffApp {
 			updater: Updater::new(),
 			notes_open: false,
 			crash: None,
+			set: None,
+			slip: None,
 		};
 		app.apply_theme(ctx);
 		app.canvas.show_badges = app.settings.show_badges;
@@ -160,6 +168,8 @@ impl TakeoffApp {
 		for f in dropped {
 			if f.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
 				self.open(f, &ctx);
+			} else if takeoff_core::set::is_set_file(&f) {
+				self.open_set(f, &ctx);
 			} else if crate::ai_panel::is_image_file(&f) {
 				images.push(f);
 			}
@@ -174,6 +184,7 @@ impl TakeoffApp {
 			d.autosave(&ctx);
 			d.update_compare(&ctx);
 		}
+		self.poll_sets(&ctx);
 		let active = self.active;
 		self.ai.others = self.docs.iter().filter(|d| d.loaded).map(|d| takeoff_agent::tools::OtherDrawing { path: d.path.clone(), doc: d.doc.clone(), page: d.page }).collect();
 		let doc = self.docs.get_mut(active);
@@ -205,6 +216,7 @@ impl TakeoffApp {
 			self.panels(ui, &p);
 		}
 		self.dialogs(&ctx, &p);
+		self.set_windows(&ctx, &p);
 		self.ai.models_window(&ctx, &mut self.settings, &p);
 		self.crash_notice(&ctx, &p);
 		self.toasts(&ctx, &p);
@@ -431,6 +443,7 @@ impl TakeoffApp {
 					}
 				}
 			});
+			self.set_menu(ui, &ctx);
 			ui.separator();
 			if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Save takeoff    ⌘S", i::SAVE))).clicked() {
 				if let Some(d) = self.doc() {
@@ -550,6 +563,13 @@ impl TakeoffApp {
 					}
 				}
 			}
+			let revised = self.docs.get(self.active).is_some_and(|d| d.doc.lock().data.previous_revision(d.page).is_some());
+			if ui.add_enabled(revised, egui::Button::new(format!("{}  Compare with the previous revision", i::HISTORY))).on_hover_text("This sheet was slip-sheeted: overlay the revision it replaced, and see which items sit on what changed").clicked() {
+				act = Some(PageAction::CompareRevision { page });
+			}
+			if ui.add_enabled(has_doc, egui::Button::new(format!("{}  Slip-sheet new revision…", i::REFRESH_CW))).on_hover_text("Replace sheets with a newer revision, matched by sheet number; the takeoff moves onto them").clicked() {
+				act = Some(PageAction::SlipSheet);
+			}
 			if let Some(a) = act {
 				ui.close();
 				self.page_action(a, &ctx);
@@ -646,9 +666,11 @@ impl TakeoffApp {
 		let active = self.active;
 		if self.settings.left_panel {
 			let mut action = None;
+			let mut set_action = None;
 			egui::Panel::left("left").resizable(true).default_size(236.0).size_range(170.0..=420.0).frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 6)).stroke(Stroke::new(1.0, p.border))).show(ui, |ui| {
 				ui.set_min_height(ui.available_height());
 				ui.set_max_width(ui.available_width());
+				self.left.set_tab = self.set.is_some();
 				if let Some(d) = self.docs.get_mut(active) {
 					let before = d.page;
 					action = self.left.ui(ui, d, p);
@@ -657,9 +679,18 @@ impl TakeoffApp {
 						d.map_go(&takeoff_core::docmap::sheet_id(page));
 					}
 				}
+				if self.left.tab == 4 {
+					let active_path = self.docs.get(active).map(|d| d.path.clone());
+					if let Some(s) = &mut self.set {
+						set_action = s.ui(ui, &self.docs, active_path.as_deref(), p);
+					}
+				}
 			});
 			if let Some(a) = action {
 				self.page_action(a, &ctx);
+			}
+			if let Some(a) = set_action {
+				self.set_action(a, &ctx);
 			}
 		}
 		let mut map_action = None;
@@ -767,6 +798,7 @@ impl TakeoffApp {
 				}
 				// Revision-compare bar.
 				let mut close_compare = false;
+				let mut select_flagged = None;
 				if let Some(c) = &mut d.compare {
 					let rect = ui.max_rect();
 					egui::Area::new(egui::Id::new("compare-bar")).fixed_pos(egui::pos2(rect.left() + 12.0, rect.bottom() - 52.0)).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
@@ -774,11 +806,18 @@ impl TakeoffApp {
 							ui.horizontal(|ui| {
 								ui.label(RichText::new(i::GIT_COMPARE_ARROWS).font(theme::icon_font(14.0)).color(p.accent));
 								let name = c.other.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-								ui.label(RichText::new(format!("Comparing with {name} p{}", c.other_page)).font(theme::semibold(12.5)));
+								let what = if c.revision { format!("Comparing with the previous revision ({name} p{})", c.other_page) } else { format!("Comparing with {name} p{}", c.other_page) };
+								ui.label(RichText::new(what).font(theme::semibold(12.5)));
 								ui.label(RichText::new("■ only here").color(Color32::from_rgb(230, 40, 40)).size(12.0));
 								ui.label(RichText::new("■ only there").color(Color32::from_rgb(40, 90, 230)).size(12.0));
 								if c.tex.is_some() {
 									ui.label(RichText::new(format!("{:.1}% changed", c.changed * 100.0)).size(12.0).color(p.text2));
+									if !c.flagged.is_empty() {
+										let n = c.flagged.len();
+										if ui.button(RichText::new(format!("{}  {n} item{} on changes", i::CIRCLE_ALERT, if n == 1 { "" } else { "s" })).color(Color32::from_rgb(0xD9, 0x8E, 0x04))).on_hover_text("Takeoff items and markups on parts of the sheet that changed: select them to check").clicked() {
+											select_flagged = Some(c.flagged.clone());
+										}
+									}
 								}
 								ui.checkbox(&mut c.show_overlay, "Overlay");
 								if ui.button(format!("{} Close", i::X)).clicked() {
@@ -790,6 +829,9 @@ impl TakeoffApp {
 				}
 				if close_compare {
 					d.compare = None;
+				}
+				if let Some(ids) = select_flagged {
+					d.selection = ids.into_iter().collect();
 				}
 				// Tool hint bubble at the top of the canvas.
 				if self.canvas.tool != Tool::Select && self.canvas.tool != Tool::Pan {
@@ -1663,6 +1705,19 @@ impl TakeoffApp {
 				self.dialog = Some(Dialog::Merge { files, error: None });
 				return;
 			}
+			PageAction::SlipSheet => {
+				self.start_slip_sheet(false, ctx);
+				return;
+			}
+			PageAction::CompareRevision { page } => {
+				if let Some(d) = self.docs.get_mut(self.active) {
+					d.go_to_page(page);
+					if !d.compare_previous(ctx) {
+						self.toast("The previous revision's file is missing", true);
+					}
+				}
+				return;
+			}
 			PageAction::Extract { pages } => {
 				let Some(d) = self.docs.get(self.active) else { return };
 				let stem = d.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1713,10 +1768,18 @@ impl TakeoffApp {
 			}
 			_ => return,
 		};
+		if let Err(e) = d.versions.before_edit(&path) {
+			self.toast(format!("Couldn't keep a copy of the PDF for undo: {e}"), true);
+			return;
+		}
 		let mut data = d.doc.lock().data.clone();
 		let result = takeoff_pdf::ops::edit_in_place(&path, &mut data, edit).map_err(|e| e.to_string());
 		if result.is_ok() {
-			d.doc.lock().edit("Page edit", |t| *t = data);
+			let state = d.versions.after_edit(&path);
+			d.doc.lock().edit("Page edit", |t| {
+				*t = data;
+				t.pdf_state = state;
+			});
 		}
 		match result {
 			Ok(msg) => {

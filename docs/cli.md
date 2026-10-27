@@ -16,6 +16,7 @@ takeoff merge a.pdf b.pdf c.pdf -o set.pdf
 takeoff extract plans.pdf --pages "3,1-2" -o subset.pdf
 takeoff rotate plans.pdf --pages 4-6 --turns 1           # in place, keeps "(original).pdf"
 takeoff delete plans.pdf --pages 7
+takeoff slip-sheet plans.pdf "plans rev C.pdf" --dry-run   # match by sheet number; drop --dry-run to swap
 
 takeoff export plans.pdf --pdf-out marked.pdf --csv markups.csv --summary quantities.csv
 takeoff export plans.pdf --xlsx takeoff.xlsx             # markups + summary sheets

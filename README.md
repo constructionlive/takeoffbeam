@@ -35,6 +35,8 @@ These links always point at the newest version.
   - Split, merge, extract, insert, rotate, delete and reorder pages. The takeoff follows its
     pages.
   - Compare revisions, layers, text search and bookmarks.
+  - Slip-sheet a new revision over the old sheets (matched by sheet number, takeoff carried
+    across, old pages kept for Compare), and group drawings into sets.
   - Flattened marked-up PDF export.
 - **AI agent:**
   - Drawing tools, plus a shell in one workspace folder you choose (or turn off). Overlays of

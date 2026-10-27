@@ -3,9 +3,11 @@
 ```
 takeoff-core     model, geometry, numbering, page remap, snap engine, coordinate dialects,
                  document store (undo/redo), markups list + CSV/Excel, sidecar I/O, the document
-                 map (sheets, areas, links)                                          — no I/O deps
+                 map (sheets, areas, links), sheet numbers + slip-sheet matching and
+                 carry-over, set files + project summary                             — no I/O deps
 takeoff-pdf      pdfium: render page/region, text + search, bookmarks, vectors; own lazy PDF
-                 object reader for layers; page tools + takeoff-aware ops; burn-in; flattened export
+                 object reader for layers; page tools + takeoff-aware ops; slip-sheets and
+                 revision compare; burn-in; flattened export
 takeoff-models   GGUF header reader, memory-fit estimate, model catalog/store/downloads,
                  llama-server supervisor
 takeoff-cloud    construction.live device-code sign-in, keychain token, models, chat base URL
@@ -28,6 +30,11 @@ event loop and adds `application:openURLs:` to winit's app delegate before runni
 - Each agent turn runs on its own thread with its own `Drawing`.
 - The takeoff `Document` is shared behind a mutex. Every change goes through `Document::edit`,
   so the user and the agent get the same undo history, dirty tracking and recomputed quantities.
+
+**Undo across PDF edits.** Page tools and slip-sheets rewrite the PDF. Each such undo step
+carries a session-only `pdf_state`, and the app keeps the file of every state (a hard link in the
+temp folder; the tools always rename a new file over the old one). When undo or redo lands on
+another state, the matching file is put back and the drawing reloads with its undo history intact.
 
 **Rendering.**
 - Each page gets a base texture (about 2400 px on the long edge) for instant paging.

@@ -4493,6 +4493,7 @@ dependencies = [
  "objc2 0.5.3",
  "open",
  "parking_lot",
+ "pdfium-render",
  "reqwest",
  "rfd",
  "serde",

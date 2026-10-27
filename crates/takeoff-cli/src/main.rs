@@ -105,7 +105,20 @@ enum Cmd {
 		#[arg(long, default_value_t = 1)]
 		turns: u32,
 	},
-	/// Export the takeoff: flattened PDF, markups CSV, quantity summary CSV, Excel workbook.
+	/// Replace sheets with a newer revision, matched by sheet number (the takeoff stays on them).
+	SlipSheet {
+		pdf: PathBuf,
+		/// The new revision: one PDF or several
+		#[arg(required = true)]
+		new: Vec<PathBuf>,
+		/// Add pages whose sheet isn't in the drawing at the end
+		#[arg(long)]
+		add_new: bool,
+		/// Only show the matches
+		#[arg(long)]
+		dry_run: bool,
+	},
+		/// Export the takeoff: flattened PDF, markups CSV, quantity summary CSV, Excel workbook.
 	Export {
 		pdf: PathBuf,
 		#[arg(long)]
@@ -297,7 +310,35 @@ fn run(cli: Cli) -> Result<(), String> {
 			sidecar::save(&pdf, &data).map_err(|e| e.to_string())?;
 			println!("{msg}");
 		}
-		Cmd::Export { pdf, pdf_out, csv, summary, xlsx } => {
+		Cmd::SlipSheet { pdf, new, add_new, dry_run } => {
+			let current = takeoff_pdf::sheets::index(&pdf).map_err(|e| e.to_string())?;
+			let prop = takeoff_pdf::slip::propose(&current, &new).map_err(|e| e.to_string())?;
+			for m in &prop.matches {
+				let (file, key) = &prop.incoming[m.incoming];
+				let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+				let to = match (m.target, m.by) {
+					(Some(t), Some(by)) => format!("→ p{} {} (by {})", t + 1, current[t].name(), by.label()),
+					_ if add_new => "→ added at the end".into(),
+					_ => "→ skipped (not in the drawing)".into(),
+				};
+				println!("{name} p{} {}  {to}", key.page, key.name());
+			}
+			if dry_run {
+				return Ok(());
+			}
+			takeoff_pdf::ops::backup_once(&pdf).map_err(|e| e.to_string())?;
+			let mut data = sidecar::load(&pdf).map_err(|e| e.to_string())?;
+			let out = takeoff_pdf::slip::slip_sheet(&pdf, &mut data, &prop.pages(add_new)).map_err(|e| e.to_string())?;
+			sidecar::save(&pdf, &data).map_err(|e| e.to_string())?;
+			for w in &out.warnings {
+				eprintln!("warning: {w}");
+			}
+			println!("{}", out.message());
+			if let Some(h) = &out.history {
+				println!("old pages kept in {}", h.display());
+			}
+		}
+				Cmd::Export { pdf, pdf_out, csv, summary, xlsx } => {
 			let data = sidecar::load(&pdf).map_err(|e| e.to_string())?;
 			if pdf_out.is_none() && csv.is_none() && summary.is_none() && xlsx.is_none() {
 				return Err("say what to export: --pdf-out, --csv, --summary and/or --xlsx".into());

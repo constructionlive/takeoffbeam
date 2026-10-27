@@ -20,6 +20,8 @@ pub struct LeftPanel {
 	pub picked: HashSet<u32>,
 	/// Discipline groups folded shut in the Pages list.
 	folded: HashSet<String>,
+	/// A set is open: a Set tab (index 4) the app fills in.
+	pub set_tab: bool,
 }
 
 /// Page actions the app runs (they rewrite the PDF and remap the takeoff).
@@ -33,6 +35,10 @@ pub enum PageAction {
 	Move { from: u32, to: u32 },
 	Split,
 	Merge,
+	/// Replace sheets with a newer revision (see `slipsheet`).
+	SlipSheet,
+	/// Compare a page with the revision it replaced.
+	CompareRevision { page: u32 },
 }
 
 impl LeftPanel {
@@ -42,12 +48,19 @@ impl LeftPanel {
 
 	pub fn ui(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc, p: &Palette) -> Option<PageAction> {
 		let mut action = None;
-		widgets::tabs(ui, p, &[(i::IMAGES, "Pages"), (i::BOOKMARK, ""), (i::LAYERS, ""), (i::SEARCH, "")], &mut self.tab);
+		let mut tabs = vec![(i::IMAGES, "Pages"), (i::BOOKMARK, ""), (i::LAYERS, ""), (i::SEARCH, "")];
+		if self.set_tab {
+			tabs.push((i::FILES, "Set"));
+		} else if self.tab == 4 {
+			self.tab = 0;
+		}
+		widgets::tabs(ui, p, &tabs, &mut self.tab);
 		ui.separator();
 		match self.tab {
 			0 => action = self.pages(ui, doc, p),
 			1 => self.bookmarks(ui, doc, p),
 			2 => self.layers(ui, doc, p),
+			4 => {}
 			_ => self.search(ui, doc, p),
 		}
 		action
@@ -90,6 +103,9 @@ impl LeftPanel {
 			}
 			if widgets::icon_button(ui, p, i::TRASH_2, "Delete selected pages", false).clicked() && n > picked.len() as u32 {
 				action = Some(PageAction::Delete { pages: picked.clone() });
+			}
+			if widgets::icon_button(ui, p, i::REFRESH_CW, "Slip-sheet: replace sheets with a new revision…", false).clicked() {
+				action = Some(PageAction::SlipSheet);
 			}
 		});
 		// Disciplines from the document map: one compact filter, and the list grouped under them.
@@ -139,6 +155,7 @@ impl LeftPanel {
 			}
 			c
 		};
+		let revised: HashSet<u32> = doc.doc.lock().data.sheet_revisions.iter().map(|r| r.page).collect();
 		let row_h = {
 			let (w, h) = doc.page_size(1);
 			thumb_w * (h / w) as f32 + 30.0
@@ -242,6 +259,11 @@ impl LeftPanel {
 							painter.text(pick.center(), egui::Align2::CENTER_CENTER, i::CHECK, theme::icon_font(11.0), p.on_accent);
 						}
 					}
+					if revised.contains(&page) {
+						let at = rect.left_bottom() + Vec2::new(14.0, -12.0);
+						painter.circle_filled(at, 9.0, Color32::from_white_alpha(230));
+						painter.text(at, egui::Align2::CENTER_CENTER, i::HISTORY, theme::icon_font(11.0), p.accent);
+					}
 					if counts[page as usize] > 0 {
 						let txt = counts[page as usize].to_string();
 						let g = painter.layout_no_wrap(txt, theme::semibold(10.0), Color32::WHITE);
@@ -271,6 +293,10 @@ impl LeftPanel {
 					resp.context_menu(|ui| {
 						if ui.button(format!("{}  Rotate clockwise", i::ROTATE_CW)).clicked() {
 							action = Some(PageAction::Rotate { pages: vec![page], quarter_turns: 1 });
+							ui.close();
+						}
+						if revised.contains(&page) && ui.button(format!("{}  Compare with the previous revision", i::GIT_COMPARE_ARROWS)).clicked() {
+							action = Some(PageAction::CompareRevision { page });
 							ui.close();
 						}
 						if ui.button(format!("{}  Extract page", i::FILE_OUTPUT)).clicked() {

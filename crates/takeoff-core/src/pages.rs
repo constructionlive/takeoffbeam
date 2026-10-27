@@ -11,6 +11,7 @@ pub fn remap_pages(d: &mut TakeoffData, map: impl Fn(u32) -> Option<u32>) {
 	d.measurements.retain_mut(|m| map(m.page).map(|p| m.page = p).is_some());
 	d.annotations.retain_mut(|a| map(a.page).map(|p| a.page = p).is_some());
 	d.page_scales.retain_mut(|s| map(s.page).map(|p| s.page = p).is_some());
+	d.sheet_revisions.retain_mut(|r| map(r.page).map(|p| r.page = p).is_some());
 	d.viewports.retain_mut(|v| {
 		map(v.page)
 			.map(|p| {
