@@ -272,7 +272,7 @@ impl Drawing {
 			.set_clear_color(PdfColor::WHITE);
 		p.render_into_bitmap_with_config(&mut bitmap, &config)?;
 		let image = RgbaImage::from_raw(out_w as u32, out_h as u32, bitmap.as_rgba_bytes())
-			.expect("bitmap size matches");
+			.ok_or_else(|| PdfError::Io(format!("pdfium bitmap is not {out_w} × {out_h}")))?;
 		Ok(Render {
 			image,
 			page_px: (page_w as u32, page_h as u32),

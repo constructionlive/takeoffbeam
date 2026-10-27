@@ -305,6 +305,9 @@ fn close(g: &Grid, m: &Mask, c: f32) -> Mask {
 /// a line moves to the nearest paper within `nudge` px.
 fn fills(img: &RgbaImage, seeds: &[(f64, f64)], gaps: &[f64], nudge: f64, seam: f64) -> Result<(Vec<Option<(Mask, bool)>>, Mask), NoFill> {
 	let g = Grid { w: img.width() as usize, h: img.height() as usize };
+	// Nothing reaches past the window: a huge gap (a model's) would overflow the searches below.
+	let most = (g.w + g.h) as f64;
+	let nudge = nudge.min(most);
 	let px = |x: usize, y: usize| {
 		let c = img.get_pixel(x as u32, y as u32).0;
 		[c[0] as f64, c[1] as f64, c[2] as f64]
@@ -354,6 +357,7 @@ fn fills(img: &RgbaImage, seeds: &[(f64, f64)], gaps: &[f64], nudge: f64, seam: 
 	let out = gaps
 		.iter()
 		.map(|&gap| {
+			let gap = gap.min(most);
 			let rr = (gap / 2.0) as f32;
 			let mut all: Option<Mask> = None;
 			for &seed in &seeds {
@@ -426,6 +430,10 @@ impl Drawing {
 		let (w, h) = (w as f64, h as f64);
 		if at.is_empty() {
 			return Ok(Err(NoFill::OnLine));
+		}
+		// A page with no size (a broken file) has no space to fill.
+		if !(w > 0.0 && h > 0.0) {
+			return Ok(Err(NoFill::Open));
 		}
 		let gaps: Vec<f64> = if gaps.is_empty() { GAPS_PT.to_vec() } else { gaps.iter().map(|g| g.max(0.0)).collect() };
 		let (ax0, ay0) = at.iter().fold((1.0f64, 1.0f64), |m, p| (m.0.min(p.x), m.1.min(p.y)));
@@ -576,5 +584,11 @@ mod tests {
 		// Both rooms and the wall between them: 399 × 149.
 		let both = 399.0 * 149.0;
 		assert!((a - both).abs() < both * 0.01, "{a} vs {both}");
+	}
+
+	#[test]
+	fn huge_gaps_dont_overflow() {
+		let img = plan();
+		let _ = fills(&img, &[(100.0, 200.0)], &[1e300], 1e300, 2.0);
 	}
 }

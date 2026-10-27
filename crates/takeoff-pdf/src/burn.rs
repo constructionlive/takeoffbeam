@@ -49,7 +49,7 @@ pub fn parse_color(hex: &str) -> (u8, u8, u8) {
 	let h = hex.trim_start_matches('#');
 	let v = |i: usize| u8::from_str_radix(h.get(i..i + 2).unwrap_or("ff"), 16).unwrap_or(255);
 	if h.len() == 3 {
-		let c = |i: usize| u8::from_str_radix(&h[i..i + 1].repeat(2), 16).unwrap_or(255);
+		let c = |i: usize| u8::from_str_radix(&h.get(i..i + 1).unwrap_or("f").repeat(2), 16).unwrap_or(255);
 		return (c(0), c(1), c(2));
 	}
 	(v(0), v(2), v(4))
@@ -118,7 +118,10 @@ impl Canvas {
 		let (bw, bh) = (w + 2.0 * pad_x, f.ascent() - f.descent() + 2.0 * pad_y);
 		let r = bh / 2.0;
 		let mut pb = PathBuilder::new();
-		pb.push_rect(tiny_skia::Rect::from_xywh(x + r.min(bw / 2.0), y, (bw - 2.0 * r).max(0.1), bh).unwrap());
+		// None off at infinity (a point far off the page in a hand-edited file).
+		if let Some(rect) = tiny_skia::Rect::from_xywh(x + r.min(bw / 2.0), y, (bw - 2.0 * r).max(0.1), bh) {
+			pb.push_rect(rect);
+		}
 		pb.push_circle(x + r, y + r, r);
 		pb.push_circle(x + bw - r, y + r, r);
 		if let Some(p) = pb.finish() {
@@ -484,7 +487,7 @@ fn cloud_path(c: &Canvas, pts: &[Point]) -> Option<tiny_skia::Path> {
 		let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
 		let (dx, dy) = (b.0 - a.0, b.1 - a.1);
 		let len = (dx * dx + dy * dy).sqrt();
-		let n = (len / arc).ceil().max(1.0) as usize;
+		let n = (len / arc).ceil().clamp(1.0, 10_000.0) as usize;
 		let (nx, ny) = (-dy / len * sign, dx / len * sign);
 		for k in 0..n {
 			let t0 = k as f32 / n as f32;
@@ -582,4 +585,18 @@ pub fn burn_label(img: &mut RgbaImage, x: f32, y: f32, size: f32, text: &str, fg
 	c.pix.data_mut().copy_from_slice(img.as_raw());
 	c.label(x, y, size, text, fg, bg);
 	img.copy_from_slice(c.pix.data());
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn odd_colours_and_far_off_labels_dont_panic() {
+		assert_eq!(parse_color("#é1"), (255, 255, 17));
+		assert_eq!(parse_color("#f80"), (255, 136, 0));
+		let mut img = RgbaImage::new(64, 64);
+		burn_label(&mut img, f32::INFINITY, 0.0, 12.0, "7", (255, 255, 255), (0, 0, 0));
+		burn_label(&mut img, f32::NAN, f32::NAN, 12.0, "7", (255, 255, 255), (0, 0, 0));
+	}
 }
