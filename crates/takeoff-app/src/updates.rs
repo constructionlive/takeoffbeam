@@ -288,6 +288,20 @@ pub fn feedback_mailto(model: &str) -> String {
 	format!("mailto:rahul@construction.live?subject={}&body={}", enc(&subject), enc(&body))
 }
 
+/// Feedback with a crash report in it: the head of the report and where the whole file is.
+pub fn crash_mailto(model: &str, report: &str, file: &std::path::Path) -> String {
+	let subject = format!("Takeoff Desk crash report (v{})", env!("CARGO_PKG_VERSION"));
+	// Windows hands mailto: to the mail app through a ~2 KB command line.
+	let budget = if cfg!(windows) { 1100 } else { 6000 };
+	let body = format!(
+		"What were you doing when it closed?\n\n\n\n---\n{}\nThe full report is {} (attach it if you can).\nModel: {}\n",
+		crate::crash::excerpt(report, budget),
+		file.display(),
+		if model.is_empty() { "none" } else { model }
+	);
+	format!("mailto:rahul@construction.live?subject={}&body={}", enc(&subject), enc(&body))
+}
+
 fn enc(s: &str) -> String {
 	let mut out = String::new();
 	for b in s.bytes() {
@@ -317,6 +331,15 @@ mod tests {
 		let m = feedback_mailto("local:Qwen 27B");
 		assert!(m.starts_with("mailto:rahul@construction.live?subject=Takeoff%20Desk%20feedback"));
 		assert!(m.contains("Model%3A%20local%3AQwen%2027B"));
+	}
+
+	#[test]
+	fn crash_mail() {
+		let r = crate::crash::report("boom", "a.rs:1:1", "main", &"   12: some::deep::frame\n".repeat(400));
+		let m = crash_mailto("", &r, std::path::Path::new("/tmp/logs/crash.txt"));
+		assert!(m.starts_with("mailto:rahul@construction.live?subject=Takeoff%20Desk%20crash%20report"));
+		assert!(m.contains("Panic%3A%20boom") && m.contains("crash.txt"));
+		assert!(m.len() < 8000);
 	}
 
 	#[test]

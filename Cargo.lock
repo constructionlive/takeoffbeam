@@ -4497,6 +4497,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sysinfo",
  "takeoff-agent",
  "takeoff-cloud",
  "takeoff-core",

@@ -3,6 +3,7 @@
 pub mod ai_panel;
 pub mod app;
 pub mod canvas;
+pub mod crash;
 pub mod docstate;
 pub mod geom;
 pub mod graph_view;

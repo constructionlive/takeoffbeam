@@ -53,6 +53,8 @@ pub struct TakeoffApp {
 	pdf_edits_confirmed: bool,
 	updater: Updater,
 	notes_open: bool,
+	/// A crash report from last time and its logs folder, offered until sent or dismissed.
+	crash: Option<(String, PathBuf)>,
 }
 
 impl TakeoffApp {
@@ -75,6 +77,7 @@ impl TakeoffApp {
 			pdf_edits_confirmed: false,
 			updater: Updater::new(),
 			notes_open: false,
+			crash: None,
 		};
 		app.apply_theme(ctx);
 		app.canvas.show_badges = app.settings.show_badges;
@@ -109,6 +112,11 @@ impl TakeoffApp {
 			}
 			Err(e) => self.toast(format!("Couldn't open {}: {e}", path.display()), true),
 		}
+	}
+
+	/// Offer last session's crash report (`crash::pending(dir)`) in a corner notice.
+	pub fn offer_crash_report(&mut self, report: String, dir: PathBuf) {
+		self.crash = Some((report, dir));
 	}
 
 	fn toast(&mut self, msg: impl Into<String>, error: bool) {
@@ -197,6 +205,7 @@ impl TakeoffApp {
 		}
 		self.dialogs(&ctx, &p);
 		self.ai.models_window(&ctx, &mut self.settings, &p);
+		self.crash_notice(&ctx, &p);
 		self.toasts(&ctx, &p);
 	}
 
@@ -582,6 +591,15 @@ impl TakeoffApp {
 			if ui.button(format!("{}  Send feedback…", i::MESSAGE_SQUARE_TEXT)).clicked() {
 				ui.close();
 				self.send_feedback();
+			}
+			if ui.button(format!("{}  Copy diagnostics", i::COPY)).on_hover_text("Version, OS, model and the last crash, for a bug report").clicked() {
+				ui.close();
+				ctx.copy_text(crate::crash::diagnostics(&self.settings.model));
+				self.toast("Copied diagnostics", false);
+			}
+			if ui.button(format!("{}  Show logs", i::FOLDER_OPEN)).on_hover_text("The folder with crash reports").clicked() {
+				ui.close();
+				self.show_logs();
 			}
 			if ui.button(format!("{}  Check for updates…", i::REFRESH_CW)).clicked() {
 				ui.close();
@@ -1778,6 +1796,51 @@ impl TakeoffApp {
 		let url = updates::feedback_mailto(&self.settings.model);
 		if open::that(&url).is_err() {
 			self.toast("No email app found — write to rahul@construction.live", true);
+		}
+	}
+
+	fn show_logs(&mut self) {
+		let dir = crate::crash::log_dir();
+		let _ = std::fs::create_dir_all(&dir);
+		if open::that(&dir).is_err() {
+			self.toast(format!("Logs are in {}", dir.display()), false);
+		}
+	}
+
+	/// Bottom-right, non-blocking: send last session's crash report by email, or let it go.
+	fn crash_notice(&mut self, ctx: &egui::Context, p: &Palette) {
+		let Some((report, dir)) = self.crash.clone() else { return };
+		let (mut send, mut show, mut dismiss) = (false, false, false);
+		egui::Area::new(egui::Id::new("crash-notice")).anchor(egui::Align2::RIGHT_BOTTOM, [-14.0, -40.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+			egui::Frame::popup(&ctx.global_style()).fill(p.panel).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+				ui.set_max_width(320.0);
+				ui.horizontal(|ui| {
+					ui.label(RichText::new(i::CIRCLE_ALERT).font(theme::icon_font(15.0)).color(p.danger));
+					ui.label(RichText::new("Takeoff Desk closed unexpectedly").font(theme::semibold(13.0)).color(p.text));
+				});
+				let first = report.lines().find(|l| l.starts_with("Panic: ")).unwrap_or("").trim_start_matches("Panic: ");
+				ui.label(RichText::new(format!("A crash report was saved. Send it to the team so we can fix it? Nothing is sent unless you click Send.{}", if first.is_empty() { String::new() } else { format!("\n\n{}", first.chars().take(140).collect::<String>()) })).size(12.0).color(p.text2));
+				ui.add_space(6.0);
+				ui.horizontal(|ui| {
+					send = ui.button(format!("{}  Send report…", i::SEND)).on_hover_text("Opens an email to the team with the report in it").clicked();
+					show = ui.button("Show").on_hover_text("Open the logs folder").clicked();
+					dismiss = ui.button("Dismiss").clicked();
+				});
+			});
+		});
+		if send {
+			let url = updates::crash_mailto(&self.settings.model, &report, &dir.join("crash.txt"));
+			if open::that(&url).is_err() {
+				self.toast("No email app found — write to rahul@construction.live", true);
+				return;
+			}
+		}
+		if show {
+			self.show_logs();
+		}
+		if send || dismiss {
+			crate::crash::archive(&dir);
+			self.crash = None;
 		}
 	}
 

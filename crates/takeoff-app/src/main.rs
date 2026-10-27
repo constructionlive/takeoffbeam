@@ -11,6 +11,10 @@ fn main() -> eframe::Result {
 	if args.get(1).map(String::as_str) == Some(takeoff_agent::channel::BRIDGE_ARG) {
 		std::process::exit(takeoff_agent::channel::run_bridge(args.get(2).map(String::as_str).unwrap_or("")));
 	}
+	// A crash last time leaves a report; offer it once the window is up.
+	let logs = takeoff_app::crash::log_dir();
+	let crashed = takeoff_app::crash::pending(&logs);
+	takeoff_app::crash::install();
 	let settings = Settings::load();
 	let files: Vec<std::path::PathBuf> = std::env::args().skip(1).map(Into::into).filter(|p: &std::path::PathBuf| p.exists()).collect();
 	let icon = image::load_from_memory(include_bytes!("../../../assets/icon.png")).ok().map(|i| {
@@ -25,6 +29,9 @@ fn main() -> eframe::Result {
 	let creator: eframe::AppCreator = Box::new(move |cc| {
 		takeoff_app::open_files::set_context(&cc.egui_ctx);
 		let mut app = TakeoffApp::new(&cc.egui_ctx, settings);
+		if let Some(report) = crashed {
+			app.offer_crash_report(report, logs);
+		}
 		for f in files {
 			app.open(f, &cc.egui_ctx);
 		}
