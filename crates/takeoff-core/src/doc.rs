@@ -322,6 +322,24 @@ mod tests {
 	}
 
 	#[test]
+	fn reloading_the_pdf_keeps_undo() {
+		let mut d = doc();
+		d.edit("Slip-sheet", |t| {
+			t.page_scales.push(PageScale { page: 1, p1: Point { x: 0.0, y: 0.0 }, p2: Point { x: 0.1, y: 0.0 }, distance: 10.0, unit: "ft".into() });
+			t.measurements.push(Measurement::new("ms_1", 1, MeasurementType::Length, vec![Point { x: 0.0, y: 0.0 }, Point { x: 0.2, y: 0.0 }]));
+			t.pdf_state = 7;
+		});
+		d.set_page_sizes(vec![(2000.0, 500.0), (612.0, 792.0)]);
+		assert_eq!((d.page_count(), d.data.pages.len()), (2, 2));
+		assert!((d.data.measurements[0].value.unwrap() - 20.0).abs() < 1e-9, "fractions of the page: same length on bigger paper");
+		assert_eq!(d.undo_label(), Some("Slip-sheet"));
+		d.undo();
+		assert_eq!((d.data.pdf_state, d.data.measurements.len()), (0, 0));
+		d.redo();
+		assert_eq!(d.data.pdf_state, 7);
+	}
+
+	#[test]
 	fn gesture_is_one_undo_step() {
 		let mut d = doc();
 		d.edit("add", |t| t.annotations.push(Annotation { id: "a".into(), page: 1, kind: AnnotationKind::Rectangle, points: vec![Point { x: 0.1, y: 0.1 }, Point { x: 0.2, y: 0.2 }], text: None, style: Default::default(), subject: None, note: None, source: None, meta: Default::default() }));

@@ -323,6 +323,7 @@ fn run(cli: Cli) -> Result<(), String> {
 			if dry_run {
 				return Ok(());
 			}
+			takeoff_pdf::ops::backup_once(&pdf).map_err(|e| e.to_string())?;
 			let mut data = sidecar::load(&pdf).map_err(|e| e.to_string())?;
 			let out = takeoff_pdf::slip::slip_sheet(&pdf, &mut data, &prop.pages(add_new)).map_err(|e| e.to_string())?;
 			sidecar::save(&pdf, &data).map_err(|e| e.to_string())?;

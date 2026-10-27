@@ -148,7 +148,9 @@ pub fn slip_sheet(path: &Path, data: &mut TakeoffData, pages: &[SlipPage]) -> Re
 			}
 			file = dir.join(format!("{stem} {stamp} ({k}).pdf"));
 		}
-		crate::ops::extract(path, data, &targets, &file)?;
+		// Its own sidecar: the old pages' takeoff (their history paths would point nowhere from there).
+		let old = TakeoffData { sheet_revisions: vec![], ..data.clone() };
+		crate::ops::extract(path, &old, &targets, &file)?;
 		Some(file)
 	};
 
