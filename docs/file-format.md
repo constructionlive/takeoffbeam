@@ -51,7 +51,8 @@ render time.
   "customFields": [{ "id": "f_…", "name": "Phase" }],
   "hiddenLayers": ["E-LIGHTING"],
   "layers": [{ "name": "E-LIGHTING", "description": "lighting fixtures and circuits" }],
-  "display": { "lengthFormat": "feetInches", "precision": 2, "fractionDenominator": 16 }
+  "display": { "lengthFormat": "feetInches", "precision": 2, "fractionDenominator": 16 },
+  "sheetRevisions": [{ "page": 2, "sheet": "A-102", "file": "plan.pdf.revisions/plan 2026-10-27 1403.pdf", … }]
 }
 ```
 
@@ -64,6 +65,50 @@ render time.
   scales, layers and custom fields.
 - **Badge numbers** are reading order per item: page → rows top to bottom → left to right. They
   are recomputed, never stored.
+
+## Sheet revisions
+
+A [slip-sheet](sets.md) keeps the pages it replaced in a history PDF next to the drawing:
+`plan.pdf` → `plan.pdf.revisions/plan 2026-10-27 1403.pdf`, with its own `.takeoff.json` (the
+takeoff of those pages as it was). The drawing's sidecar lists them, oldest first:
+
+```jsonc
+"sheetRevisions": [{
+  "page": 2,                          // the page it is an earlier revision of, as the drawing is now
+  "sheet": "A-102",                   // the new page's sheet number
+  "file": "plan.pdf.revisions/plan 2026-10-27 1403.pdf",   // relative to the drawing's folder
+  "filePage": 2,                      // its page in that file
+  "replacedAt": "2026-10-27T14:03:12Z",
+  "from": "plan rev C.pdf", "fromPage": 5,                 // where the new page came from
+  "slip": "sl_…",                     // one id per slip-sheet
+  "changed": 0.012,                   // share of the sheet that changed
+  "review": ["m_…", "ms_…"],          // items on changed parts of the sheet: check them
+  "warning": "Page size changed (36.0×24.0 in → 42.0×24.0 in): …"
+}]
+```
+
+The field is optional: files without it load as before, and readers that don't know it (the
+platform, older Takeoff Desk) ignore it. Page tools renumber it with the pages.
+
+## Set files
+
+A [set](sets.md) is a separate file, `Tower.takeoffset.json`, that lists drawings in order. Each
+drawing keeps its own `.takeoff.json`; the set holds no takeoff.
+
+```jsonc
+{
+  "version": 1,
+  "name": "Tower",
+  "documents": [
+    { "path": "Tower - Architectural.pdf", "name": "Architectural" },   // relative to the set file
+    { "path": "Structural/S-set.pdf" },                                 // name: the file name
+    { "path": "/Volumes/Projects/Tower/MEP.pdf" }                       // or absolute
+  ],
+  "lastUpdated": "2026-10-27T14:03:12Z"
+}
+```
+
+Unknown fields are ignored on load.
 
 ## Document map
 

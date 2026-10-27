@@ -20,7 +20,8 @@ The thumbnails show a badge with the number of takeoff items on each page.
   along.
 
 Tools that rewrite the open PDF (rotate, delete, insert, move) ask once per session, and they keep
-a one-time backup, `<name> (original).pdf`, next to the file.
+a one-time backup, `<name> (original).pdf`, next to the file. Undo puts the PDF back as it was
+before the edit, along with the takeoff.
 
 - **Split:** every N pages, by page ranges (`1-12, 13-40, 41-`), or one file per top-level
   bookmark.
@@ -33,8 +34,15 @@ a one-time backup, `<name> (original).pdf`, next to the file.
 - **blue**: only on the other one;
 - **black**: unchanged.
 
-The bar at the bottom shows the share of the sheet that changed, toggles the overlay, and follows
-you as you change pages.
+The bar at the bottom shows the share of the sheet that changed and how many takeoff items sit on
+the changes (click to select them), toggles the overlay, and follows you as you change pages.
+
+## Slip-sheets and sets
+
+*Document → Slip-sheet new revision…* replaces sheets with a newer revision, matched by sheet
+number. The takeoff moves onto the new pages, the old pages are kept for *Compare with the
+previous revision*, and one undo puts it all back. Sets group several drawings into one project.
+See [Slip-sheets and sets](sets.md).
 
 ## Layers
 
