@@ -387,8 +387,16 @@ pub(crate) fn drop_filler(args: Value) -> Value {
 	Value::Object(obj)
 }
 
-/// Run one tool.
+/// Run one tool. A panic in it (a bug met on an odd drawing or reply) comes
+/// back as the tool's error, so the turn carries on and the thread lives.
 pub fn call(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, String> {
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(ctx, name, args))).unwrap_or_else(|why| {
+		let why = why.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| why.downcast_ref::<String>().cloned()).unwrap_or_default();
+		Err(format!("{name} hit an internal error ({why}). Try another way; tell the estimator if it keeps happening."))
+	})
+}
+
+fn dispatch(ctx: &mut ToolCtx, name: &str, args: Value) -> Result<ToolOutput, String> {
 	// Models sometimes send the arguments as a JSON string.
 	let args = match args {
 		Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
