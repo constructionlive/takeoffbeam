@@ -1,0 +1,16 @@
+{
+	"name": "takeoff-beam",
+	"version": "0.1.0",
+	"description": "Quantity takeoff on PDF drawings from Claude Code: count symbols, measure runs and areas, set scale, read title blocks and schedules, mark up sheets. Runs Takeoff Beam's local MCP server, so the drawing never leaves the machine.",
+	"author": { "name": "construction.live", "url": "https://www.construction.live" },
+	"homepage": "https://www.construction.live/open",
+	"repository": "https://github.com/constructionlive/takeoffbeam",
+	"license": "Apache-2.0",
+	"keywords": ["construction", "takeoff", "estimating", "pdf", "drawings", "bluebeam", "mcp"],
+	"mcpServers": {
+		"takeoff": {
+			"command": "node",
+			"args": ["${CLAUDE_PLUGIN_ROOT}/scripts/takeoff-mcp.js"]
+		}
+	}
+}

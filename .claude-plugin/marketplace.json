@@ -1,0 +1,15 @@
+{
+	"name": "takeoffbeam",
+	"description": "Takeoff Beam: free, local quantity takeoff for construction drawings, from construction.live",
+	"owner": { "name": "construction.live", "url": "https://www.construction.live" },
+	"plugins": [
+		{
+			"name": "takeoff-beam",
+			"source": "./claude-plugin",
+			"description": "Quantity takeoff on PDF drawings from Claude Code, through Takeoff Beam's local MCP server.",
+			"version": "0.1.0",
+			"category": "productivity",
+			"tags": ["construction", "takeoff", "estimating", "pdf", "mcp"]
+		}
+	]
+}
