@@ -1,0 +1,5 @@
+# Builds run from cargo (tests, `cargo run`) keep the construction.live
+# sign-in out of the macOS keychain: each rebuild is a new binary to macOS,
+# which asks for the keychain password every time. Packaged apps don't see this.
+[env]
+TAKEOFF_NO_KEYCHAIN = "1"

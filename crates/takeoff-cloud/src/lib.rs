@@ -223,14 +223,20 @@ pub mod token {
 		account: Account,
 	}
 
+	/// TAKEOFF_NO_KEYCHAIN (set for cargo test/run in .cargo/config.toml)
+	/// keeps the sign-in in the file only: every fresh build is a new binary
+	/// to macOS, which would ask for the keychain password each time.
+	fn keychain() -> bool {
+		std::env::var_os("TAKEOFF_NO_KEYCHAIN").is_none()
+	}
+
 	fn fallback_path() -> Option<std::path::PathBuf> {
 		Some(dirs::config_dir()?.join("Takeoff Desk").join("cloud-token.json"))
 	}
 
 	pub fn save(token: &str, account: &Account) -> Result<(), String> {
 		let json = serde_json::to_string(&Saved { token: token.into(), account: account.clone() }).map_err(|e| e.to_string())?;
-		let keychain = keyring::Entry::new(SERVICE, USER).and_then(|e| e.set_password(&json));
-		if keychain.is_ok() {
+		if keychain() && keyring::Entry::new(SERVICE, USER).and_then(|e| e.set_password(&json)).is_ok() {
 			if let Some(p) = fallback_path() {
 				let _ = std::fs::remove_file(p);
 			}
@@ -248,17 +254,19 @@ pub mod token {
 	}
 
 	pub fn load() -> Option<(String, Account)> {
-		let raw = keyring::Entry::new(SERVICE, USER)
-			.and_then(|e| e.get_password())
-			.ok()
+		let raw = keychain()
+			.then(|| keyring::Entry::new(SERVICE, USER).and_then(|e| e.get_password()).ok())
+			.flatten()
 			.or_else(|| std::fs::read_to_string(fallback_path()?).ok())?;
 		let saved: Saved = serde_json::from_str(&raw).ok()?;
 		Some((saved.token, saved.account))
 	}
 
 	pub fn clear() {
-		if let Ok(e) = keyring::Entry::new(SERVICE, USER) {
-			let _ = e.delete_credential();
+		if keychain() {
+			if let Ok(e) = keyring::Entry::new(SERVICE, USER) {
+				let _ = e.delete_credential();
+			}
 		}
 		if let Some(p) = fallback_path() {
 			let _ = std::fs::remove_file(p);
