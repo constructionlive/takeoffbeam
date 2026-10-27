@@ -69,6 +69,27 @@ each other piece to join them into one area. If the space is open to the rest of
 nothing is filled and the status bar says so; use *Area* and click its corners. It works on scans
 too.
 
+## Several pages on screen
+
+*View → Page layout*, or the four buttons in the status bar, shows one page at a time (the
+default), **Continuous** (pages one under another, scrolling from one to the next), **Two pages**
+side by side, or two pages continuous. *Cover page on its own* starts the spreads at page 2, like
+a book. **⌘4 / ⌘5 / ⌘6 / ⌘7** switch between them; the choice is remembered.
+
+- **The current page** is the one under the middle of the view as you scroll. The page box,
+  the highlighted thumbnail, *This page* filters, the status bar and the AI all follow it.
+- **Paging** (PgUp/PgDn, the page box, thumbnails, bookmarks, search hits, links) scrolls to the
+  page and keeps the zoom. *Fit page* and *Fit width* fit the current page (its spread, with
+  spreads).
+- **Tools work on the page under the pointer.** A click there makes it the current page.
+- **A shape stays on its page.** Once you have clicked its first point, clicks on another page
+  are ignored (the status bar says so): finish it with Enter or a double-click, or Esc. A drag that
+  runs off the page stops at its edge. Clicks in the gaps between pages don't start anything.
+- **It is only a view.** Every count, measurement and markup still belongs to one page, with the
+  same undo and the same saved takeoff, whichever layout you use.
+- **Large sets stay quick.** Pages are laid out from their sizes, and only the ones on screen (and
+  just beyond) are drawn, a few at a time.
+
 ## Editing
 
 - **Select (V):**

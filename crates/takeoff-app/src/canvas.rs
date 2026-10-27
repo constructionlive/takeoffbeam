@@ -54,6 +54,8 @@ pub struct Canvas {
 	seq_cache: Option<(u64, HashMap<String, u32>, HashMap<String, u32>)>,
 	pub requests: Vec<CanvasRequest>,
 	pub cursor_page: Option<Point>,
+	/// The page `cursor_page` is on.
+	pub cursor_on: u32,
 	pub show_badges: bool,
 	/// Mapped callouts are links (click one to go where it points).
 	pub map_links: bool,
@@ -102,6 +104,7 @@ impl Default for Canvas {
 			seq_cache: None,
 			requests: vec![],
 			cursor_page: None,
+			cursor_on: 1,
 			show_badges: true,
 			map_links: true,
 			curve: CurveMode::Straight,
@@ -154,6 +157,12 @@ impl Canvas {
 
 	pub fn is_busy(&self) -> bool {
 		!self.points.is_empty() || self.drag.is_some() || self.callout_box.is_some()
+	}
+
+	/// Something in progress belongs to the current page (a shape, a drag,
+	/// a note being typed), so it stays current wherever the pointer goes.
+	fn holds_page(&self) -> bool {
+		!self.points.is_empty() || self.callout_box.is_some() || self.editing_text.is_some() || self.drag.as_ref().is_some_and(|d| !matches!(d, Drag::Pan))
 	}
 
 	/// Escape: cancel what's in progress, else drop back to Select.
@@ -279,17 +288,44 @@ impl Canvas {
 		}
 
 		self.navigate(ui, &resp, doc, wheel_zooms);
-		self.paint_page(&painter, doc, p);
-		self.paint_sheet_overlays(&ctx, &painter, doc, p);
-		self.page_spinner(ui, doc, p);
-		self.paint_items(&painter, doc, p);
-		self.paint_overlays(&painter, doc, p);
-		self.paint_map(&painter, doc, p);
+		if !self.holds_page() {
+			doc.follow_view();
+		}
+		// Every page on screen (one, unless continuous or spreads), each
+		// painted as the current page: pictures first, then the takeoff.
+		let pages = doc.visible_pages();
+		let current = doc.page;
+		for &pg in &pages {
+			doc.page = pg;
+			self.paint_page(&painter, doc, p);
+			self.page_spinner(ui, doc, p);
+		}
+		doc.page = current;
+		self.paint_sheet_overlays(&ctx, &painter, doc, p, &pages);
+		for &pg in &pages {
+			doc.page = pg;
+			self.paint_items(&painter, doc, p);
+			self.paint_overlays(&painter, doc, p);
+			self.paint_map(&painter, doc, p);
+			self.paint_annotation_text(ui, doc);
+		}
+		doc.page = current;
+		// Tools work on the page under the pointer: it is current while they do.
+		let hover = ui.input(|i| i.pointer.hover_pos()).filter(|h| doc.canvas_rect.contains(*h));
+		let under = hover.and_then(|h| doc.page_at(h)).filter(|_| doc.layout.multi() && !self.holds_page());
+		if let Some(pg) = under {
+			doc.page = pg;
+		}
 		self.interact(ui, &resp, doc, p, snap_on);
 		self.update_follow_cache(doc);
 		self.paint_in_progress(&painter, doc, p);
 		self.text_editor(ui, doc);
 		self.context_menu(&resp, doc);
+		// Just hovering leaves the current page as it was; a click (or a shape begun) makes it this one.
+		let pressed = ui.input(|i| i.pointer.any_pressed());
+		if under.is_some() && under == Some(doc.page) && !pressed && !self.holds_page() {
+			doc.page = current;
+		}
 	}
 
 	fn navigate(&mut self, ui: &egui::Ui, resp: &egui::Response, doc: &mut OpenDoc, wheel_zooms: bool) {
@@ -345,7 +381,7 @@ impl Canvas {
 	}
 
 	fn page_spinner(&self, ui: &mut egui::Ui, doc: &OpenDoc, p: &Palette) {
-		let waiting_base = !doc.base.contains_key(&doc.page);
+		let waiting_base = !doc.base.contains_key(&doc.page) && !doc.thumbs.contains_key(&doc.page);
 		if waiting_base {
 			let r = doc.page_rect().intersect(doc.canvas_rect);
 			if r.width() > 40.0 && r.height() > 40.0 {
@@ -362,17 +398,16 @@ impl Canvas {
 		}
 		painter.rect_filled(pr, 0.0, Color32::WHITE);
 		let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-		if let Some(tex) = doc.base.get(&doc.page) {
+		// A page far out in a continuous view may only have its thumbnail.
+		if let Some(tex) = doc.base.get(&doc.page).or(doc.thumbs.get(&doc.page)) {
 			painter.image(tex.id(), pr, uv, Color32::WHITE);
 		}
-		if let Some(s) = &doc.sharp {
-			if s.page == doc.page {
-				let r = Rect::from_min_size(
-					Pos2::new(pr.min.x + s.region.x as f32 * pr.width(), pr.min.y + s.region.y as f32 * pr.height()),
-					Vec2::new(s.region.w as f32 * pr.width(), s.region.h as f32 * pr.height()),
-				);
-				painter.image(s.tex.id(), r, uv, Color32::WHITE);
-			}
+		if let Some(s) = doc.sharp.as_ref().filter(|s| s.page == doc.page).or(doc.side_sharp.get(&doc.page)) {
+			let r = Rect::from_min_size(
+				Pos2::new(pr.min.x + s.region.x as f32 * pr.width(), pr.min.y + s.region.y as f32 * pr.height()),
+				Vec2::new(s.region.w as f32 * pr.width(), s.region.h as f32 * pr.height()),
+			);
+			painter.image(s.tex.id(), r, uv, Color32::WHITE);
 		}
 		if let Some(c) = &doc.compare {
 			if c.page == doc.page && c.show_overlay {
@@ -391,10 +426,12 @@ impl Canvas {
 
 	/// Overlays (SVG / images the AI or a person laid over the sheet), between
 	/// the page and the takeoff so marks stay on top.
-	fn paint_sheet_overlays(&mut self, ctx: &egui::Context, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
-		let overlays: Vec<Overlay> = doc.doc.lock().data.overlays.iter().filter(|o| o.page == doc.page && !o.hidden).cloned().collect();
+	fn paint_sheet_overlays(&mut self, ctx: &egui::Context, painter: &egui::Painter, doc: &OpenDoc, p: &Palette, pages: &[u32]) {
+		let overlays: Vec<Overlay> = doc.doc.lock().data.overlays.iter().filter(|o| pages.contains(&o.page) && !o.hidden).cloned().collect();
 		for o in &overlays {
-			let r = Rect::from_min_max(doc.to_screen(Point { x: o.x, y: o.y }), doc.to_screen(Point { x: o.x + o.w, y: o.y + o.h }));
+			let pr = doc.page_rect_of(o.page);
+			let at = |x: f64, y: f64| Pos2::new(pr.min.x + x as f32 * pr.width(), pr.min.y + y as f32 * pr.height());
+			let r = Rect::from_min_max(at(o.x, o.y), at(o.x + o.w, o.y + o.h));
 			if !r.is_positive() {
 				continue;
 			}
@@ -944,7 +981,7 @@ impl Canvas {
 		let id = doc.selection.iter().next()?.clone();
 		let d = doc.doc.lock();
 		let near = |q: &Point| (doc.to_screen(*q) - pos).length() <= 7.0;
-		if let Some(m) = d.data.measurements.iter().find(|m| m.id == id) {
+		if let Some(m) = d.data.measurements.iter().find(|m| m.id == id && m.page == doc.page) {
 			if let Some(idx) = m.points.iter().position(near) {
 				return Some(Drag::Vertex { id, idx, cutout: None });
 			}
@@ -954,13 +991,13 @@ impl Canvas {
 				}
 			}
 		}
-		if let Some(a) = d.data.annotations.iter().find(|a| a.id == id) {
+		if let Some(a) = d.data.annotations.iter().find(|a| a.id == id && a.page == doc.page) {
 			let rect_like = matches!(a.kind, AnnotationKind::Rectangle | AnnotationKind::Ellipse | AnnotationKind::Text | AnnotationKind::Stamp | AnnotationKind::Highlight | AnnotationKind::Callout);
 			if let Some(idx) = a.points.iter().position(near) {
 				return Some(if rect_like && idx < 2 { Drag::Resize { id, corner: idx } } else { Drag::Vertex { id, idx, cutout: None } });
 			}
 		}
-		if let Some(m) = d.data.marks.iter().find(|m| m.id == id) {
+		if let Some(m) = d.data.marks.iter().find(|m| m.id == id && m.page == doc.page) {
 			let corners = [Point { x: m.x, y: m.y }, Point { x: m.x + m.w, y: m.y + m.h }];
 			if let Some(c) = corners.iter().position(near) {
 				return Some(Drag::Resize { id, corner: c });
@@ -1007,10 +1044,19 @@ impl Canvas {
 		}
 		let in_canvas = hover.is_some_and(|h| doc.canvas_rect.contains(h));
 		self.cursor_page = hover.filter(|_| in_canvas).map(|h| doc.to_page(h));
+		self.cursor_on = doc.page;
+		let pos = hover.unwrap_or(doc.canvas_rect.center());
+		// Continuous / spreads: a shape stays on the page it was begun on (clicks
+		// off it don't add to it), and a new one starts on a page, not in a gap.
+		let open_shape = !self.points.is_empty() || self.callout_box.is_some();
+		let off = doc.layout.multi() && if open_shape { !doc.page_rect().expand(doc.arr.gap * doc.zoom / 2.0).contains(pos) } else { self.tool != Tool::Select && self.drag.is_none() && doc.page_at(pos).is_none() };
+		if off && open_shape && resp.clicked() {
+			self.requests.push(CanvasRequest::Status(format!("This shape is on page {}: finish it there (Enter), or Esc to cancel.", doc.page)));
+		}
+		let in_canvas = in_canvas && !off;
 		if !in_canvas && self.drag.is_none() {
 			self.hover_snap = None;
 		}
-		let pos = hover.unwrap_or(doc.canvas_rect.center());
 		let pt = if in_canvas || self.drag.is_some() { self.snapped(doc, pos, mods, snap_on) } else { doc.to_page(pos) };
 		// Drags start where the button went down, not where egui noticed the drag.
 		let press = ui.input(|i| i.pointer.press_origin());
@@ -1579,11 +1625,7 @@ impl Canvas {
 	}
 
 	fn text_editor(&mut self, ui: &mut egui::Ui, doc: &mut OpenDoc) {
-		let Some(id) = self.editing_text.clone() else {
-			self.paint_annotation_text(ui, doc);
-			return;
-		};
-		self.paint_annotation_text(ui, doc);
+		let Some(id) = self.editing_text.clone() else { return };
 		let (rect, size) = {
 			let d = doc.doc.lock();
 			let Some(a) = d.data.annotations.iter().find(|a| a.id == id) else {

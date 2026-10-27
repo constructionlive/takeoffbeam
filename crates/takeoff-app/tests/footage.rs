@@ -161,7 +161,7 @@ fn launch_footage() {
 	r.settle(|a| a.debug_doc().is_some_and(|d| d.sharp.is_some()), Duration::from_secs(8));
 	r.app().debug_right_tab(0);
 	r.app().debug_doc().unwrap().ensure_snap();
-	r.settle(|a| a.debug_doc().is_some_and(|d| d.snap.is_some()), Duration::from_secs(10));
+	r.settle(|a| a.debug_doc().is_some_and(|d| !d.snap.is_empty()), Duration::from_secs(10));
 
 	// ── Clip 1: count by clicking ────────────────────────────────────
 	r.start("count");

@@ -50,6 +50,8 @@ pub struct Settings {
 	pub follow_agent: bool,
 	/// Callouts the AI mapped are links on the sheet.
 	pub map_links: bool,
+	/// Single page, continuous, two-page spreads (View → Page layout).
+	pub page_layout: crate::layout::PageLayout,
 }
 
 impl Default for Settings {
@@ -80,6 +82,7 @@ impl Default for Settings {
 			ai_workspace: String::new(),
 			follow_agent: false,
 			map_links: true,
+			page_layout: Default::default(),
 		}
 	}
 }

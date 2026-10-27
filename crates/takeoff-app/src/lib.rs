@@ -8,6 +8,7 @@ pub mod docstate;
 pub mod geom;
 pub mod graph_view;
 pub mod icons;
+pub mod layout;
 pub mod left_panel;
 pub mod map_panel;
 pub mod markups;
