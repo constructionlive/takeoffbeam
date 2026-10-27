@@ -120,7 +120,7 @@ impl MarkupsList {
 		};
 		shown.sort_by(|a, b| {
 			let (ka, kb) = (key(a), key(b));
-			ka.0.cmp(&kb.0).then(ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
+			ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
 		});
 		if !self.ascending {
 			shown.reverse();

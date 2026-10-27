@@ -175,6 +175,10 @@ fn set_done(h: &DownloadHandle, done: u64) {
 	let mut g = h.inner.lock();
 	g.progress.done = done;
 	let now = Instant::now();
+	// Went back (the server ignored Range, the file restarted): the speed starts over too.
+	if g.window.last().is_some_and(|w| w.1 > done) {
+		g.window.clear();
+	}
 	g.window.push((now, done));
 	g.window.retain(|(t, _)| now.duration_since(*t) < Duration::from_secs(5));
 	if let (Some(first), Some(last)) = (g.window.first().copied(), g.window.last().copied()) {

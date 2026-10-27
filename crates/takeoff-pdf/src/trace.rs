@@ -226,6 +226,9 @@ impl Drawing {
 	pub fn track_raster(&self, page: u32, a: Point, b: Point) -> Result<Option<Vec<Point>>, PdfError> {
 		let (w, h) = self.page_size_pt(page)?;
 		let (w, h) = (w as f64, h as f64);
+		if !(w > 0.0 && h > 0.0) {
+			return Ok(None); // a page with no size (a broken file)
+		}
 		let pad = (GAP * 2.0) / w.min(h);
 		let (x0, y0) = ((a.x.min(b.x) - pad).max(0.0), (a.y.min(b.y) - pad).max(0.0));
 		let (x1, y1) = ((a.x.max(b.x) + pad).min(1.0), (a.y.max(b.y) + pad).min(1.0));

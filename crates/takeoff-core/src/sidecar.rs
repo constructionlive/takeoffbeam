@@ -67,4 +67,39 @@ mod tests {
 		assert!(back.last_updated.is_some());
 		std::fs::remove_dir_all(dir).ok();
 	}
+
+	#[test]
+	fn corrupt_files_load_to_an_error() {
+		let dir = std::env::temp_dir().join(format!("takeoff-sidecar-bad-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let pdf = dir.join("x.pdf");
+		let good = serde_json::to_vec(&TakeoffData::default()).unwrap();
+		let bad: [&[u8]; 6] = [b"", b"\xff\xfe\x00garbage", br#"{"version": "one"}"#, br#"{"version": 1, "reviewType": "takeoff", "marks": [{"id": 3}]}"#, br#"{"version": 1e999}"#, &good[..good.len() / 2]];
+		for b in bad {
+			std::fs::write(sidecar_path(&pdf), b).unwrap();
+			assert!(matches!(load(&pdf), Err(SidecarError::Json(_))), "{}", String::from_utf8_lossy(b));
+		}
+		// Well-formed but odd: too few points, far off the page, page 0, an id at usize::MAX.
+		let odd = br##"{"version": 1, "reviewType": "takeoff",
+			"measurements": [
+				{"id": "a", "page": 1, "type": "angle", "points": [{"x": 0.1, "y": 0.1}, {"x": 0.2, "y": 0.2}]},
+				{"id": "b", "page": 0, "type": "area", "points": []},
+				{"id": "c", "page": 1, "type": "length", "points": [{"x": 1e300, "y": -1e300}, {"x": 0.5, "y": 0.5}]}
+			],
+			"marks": [{"id": "m", "page": 1, "x": 1e300, "y": 0.5, "w": 0, "h": -2}],
+			"pageScales": [{"page": 1, "p1": {"x": 0.5, "y": 0.5}, "p2": {"x": 0.5, "y": 0.5}, "distance": 10, "unit": "ft"}]
+		}"##;
+		std::fs::write(sidecar_path(&pdf), odd).unwrap();
+		let raw = load(&pdf).unwrap();
+		let mut clean = raw.clone();
+		crate::normalize::normalize(&mut clean);
+		for d in [&raw, &clean] {
+			for m in &d.measurements {
+				let _ = crate::geometry::measurement_quantity(m, d.page_scales.first(), 1000.0, 800.0);
+			}
+			let _ = crate::numbering::mark_seq(&d.marks);
+			let _ = crate::numbering::measurement_seq(&d.measurements);
+		}
+		std::fs::remove_dir_all(dir).ok();
+	}
 }

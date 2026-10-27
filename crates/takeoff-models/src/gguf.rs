@@ -145,8 +145,27 @@ fn read_u64(r: &mut impl Read) -> Result<u64, GgufError> {
 	Ok(u64::from_le_bytes(read_n(r)?))
 }
 fn read_string(r: &mut impl Read) -> Result<String, GgufError> {
-	let len = read_u64(r)? as usize;
-	let mut buf = vec![0u8; len];
-	r.read_exact(&mut buf)?;
+	let len = read_u64(r)?;
+	// Read what is there rather than allocating a garbage length up front (a truncated download).
+	let mut buf = Vec::new();
+	r.take(len).read_to_end(&mut buf)?;
+	if (buf.len() as u64) < len {
+		return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+	}
 	Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn garbage_string_length_is_an_error() {
+		let mut b = (1u64 << 60).to_le_bytes().to_vec();
+		b.extend_from_slice(b"abc");
+		assert!(matches!(read_string(&mut b.as_slice()), Err(GgufError::Io(_))));
+		let mut b = 3u64.to_le_bytes().to_vec();
+		b.extend_from_slice(b"abc");
+		assert_eq!(read_string(&mut b.as_slice()).unwrap(), "abc");
+	}
 }

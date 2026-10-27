@@ -422,7 +422,10 @@ pub fn status(channel: Channel) -> ChannelStatus {
 					let plan = j.get("subscriptionType").and_then(Value::as_str).filter(|s| !s.is_empty());
 					let method = j.get("authMethod").and_then(Value::as_str).unwrap_or("");
 					st.account = match plan {
-						Some(p) => Some(format!("{}{} plan", p[..1].to_uppercase(), &p[1..])),
+						Some(p) => {
+							let mut c = p.chars();
+							Some(format!("{}{} plan", c.next().map(|f| f.to_uppercase().to_string()).unwrap_or_default(), c.as_str()))
+						}
 						None if method.to_lowercase().contains("key") => Some("API key (billed per token)".into()),
 						None => None,
 					};

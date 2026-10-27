@@ -86,7 +86,8 @@ impl StreamAssembler {
 		}
 		if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
 			for (pos, c) in calls.iter().enumerate() {
-				let idx = c.get("index").and_then(Value::as_u64).map(|i| i as usize).unwrap_or(pos);
+				// A garbage index (a broken server) would grow the list without end.
+				let idx = c.get("index").and_then(Value::as_u64).filter(|i| *i < 128).map(|i| i as usize).unwrap_or(pos);
 				while self.partial.len() <= idx {
 					self.partial.push(ToolCall::default());
 				}
@@ -132,12 +133,12 @@ impl StreamAssembler {
 	}
 }
 
-fn client(timeout: Option<Duration>) -> reqwest::blocking::Client {
+fn client(timeout: Option<Duration>) -> Result<reqwest::blocking::Client, String> {
 	reqwest::blocking::Client::builder()
 		.timeout(timeout)
 		.connect_timeout(Duration::from_secs(20))
 		.build()
-		.expect("http client")
+		.map_err(|e| format!("could not set up the HTTP client: {e}"))
 }
 
 fn endpoint(base: &str, path: &str) -> String {
@@ -145,7 +146,7 @@ fn endpoint(base: &str, path: &str) -> String {
 }
 
 fn request(p: &ProviderConfig, body: &Value, timeout: Option<Duration>) -> Result<reqwest::blocking::Response, String> {
-	let mut req = client(timeout).post(endpoint(&p.base_url, "chat/completions")).json(body);
+	let mut req = client(timeout)?.post(endpoint(&p.base_url, "chat/completions")).json(body);
 	if let Some(k) = p.api_key.as_deref().filter(|k| !k.is_empty()) {
 		req = req.bearer_auth(k);
 	}
@@ -240,7 +241,7 @@ pub fn complete_with(p: &ProviderConfig, messages: &[Value], max_tokens: Option<
 
 /// Model ids the server offers (`GET /models`).
 pub fn models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>, String> {
-	let mut req = client(Some(Duration::from_secs(20))).get(endpoint(base_url, "models"));
+	let mut req = client(Some(Duration::from_secs(20)))?.get(endpoint(base_url, "models"));
 	if let Some(k) = api_key.filter(|k| !k.is_empty()) {
 		req = req.bearer_auth(k);
 	}
@@ -314,6 +315,14 @@ mod tests {
 		let c = a.finish();
 		assert_eq!(c.finish_reason.as_deref(), Some("stop"));
 		assert!(c.tool_calls.is_empty());
+	}
+
+	#[test]
+	fn garbage_tool_call_index_stays_bounded() {
+		let mut a = StreamAssembler::default();
+		a.line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":18446744073709551615,"id":"x","function":{"name":"view","arguments":"{}"}}]}}]}"#);
+		a.line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":4000000000,"function":{"name":"summary"}}]}}]}"#);
+		assert_eq!(a.partial.len(), 1);
 	}
 
 	#[test]

@@ -47,7 +47,7 @@ fn scan(y: f32, polys: &[&[Pos2]]) -> Vec<(f32, f32)> {
 			}
 		}
 	}
-	xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+	xs.sort_by(f32::total_cmp);
 	xs.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect()
 }
 

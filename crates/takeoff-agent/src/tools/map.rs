@@ -572,8 +572,9 @@ pub fn parse_pages(spec: &str, n: u32) -> Result<Vec<u32>, String> {
 			None => (part.parse::<u32>(), part.parse::<u32>()),
 		};
 		let (Ok(a), Ok(b)) = (a, b) else { return Err(format!("can't read pages '{spec}' (e.g. \"1-12, 15\")")) };
-		for p in a.min(b)..=a.max(b) {
-			if p >= 1 && p <= n && !out.contains(&p) {
+		// Only the drawing's own pages: "1-4000000000" from a model must not loop four billion times.
+		for p in a.min(b).max(1)..=a.max(b).min(n) {
+			if !out.contains(&p) {
 				out.push(p);
 			}
 		}
@@ -640,4 +641,17 @@ pub fn contact_sheet(ctx: &mut ToolCtx, a: ContactArgs) -> Result<ToolOutput, St
 		text.push_str(&format!("\nOnly the first {CONTACT_MAX} pages are shown: ask for the rest in another call."));
 	}
 	Ok(ToolOutput { text, images: vec![ViewImage { png, width: gw, height: gh, view_id: "contact".into(), caption }] })
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn page_ranges_stay_on_the_drawing() {
+		assert_eq!(parse_pages("3-1, 2, 9", 5).unwrap(), vec![1, 2, 3]);
+		assert_eq!(parse_pages("4-4000000000", 6).unwrap(), vec![4, 5, 6]);
+		assert!(parse_pages("0", 6).is_err());
+		assert!(parse_pages("7-9", 6).is_err());
+	}
 }

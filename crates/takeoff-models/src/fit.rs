@@ -17,6 +17,7 @@ use crate::sys::MemoryInfo;
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// llama-server's default micro-batch.
 const N_UBATCH: u64 = 512;
+const MAX_LAYERS: u64 = 4096;
 const RUNTIME_OVERHEAD: u64 = 400 * 1024 * 1024;
 /// Vision encoder activations while an image is being encoded.
 const VISION_COMPUTE: u64 = 600 * 1024 * 1024;
@@ -75,7 +76,8 @@ impl ModelShape {
 
 	pub fn from_meta(meta: &GgufMeta, weights_bytes: u64, projector_bytes: u64) -> Self {
 		let arch = meta.arch().unwrap_or("unknown").to_string();
-		let n_layer = meta.arch_u64("block_count").unwrap_or(0);
+		// No model has more; a garbage header would allocate a vector per layer without end.
+		let n_layer = meta.arch_u64("block_count").unwrap_or(0).min(MAX_LAYERS);
 		let n_embd = meta.arch_u64("embedding_length").unwrap_or(0);
 		let n_head = meta.arch_u64("attention.head_count").unwrap_or(1).max(1);
 		let head_dim = n_embd / n_head;
@@ -304,6 +306,12 @@ mod tests {
 		assert_eq!(s.attention_layers, 16);
 		// 16 layers × 4 heads × 512 elems × 2 bytes = 64 KiB per token.
 		assert_eq!(s.kv_bytes(1, CacheType::F16), 65_536);
+	}
+
+	#[test]
+	fn garbage_layer_count_is_bounded() {
+		let m = meta(&[("general.architecture", Value::Str("x".into())), ("x.block_count", Value::U64(u64::MAX))]);
+		assert_eq!(ModelShape::from_meta(&m, 0, 0).attention_layers, MAX_LAYERS);
 	}
 
 	#[test]

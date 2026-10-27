@@ -213,8 +213,8 @@ impl TakeoffData {
 			p.y = (p.y + dy).clamp(0.0, 1.0);
 		};
 		for m in self.marks.iter_mut().filter(|m| ids.contains(&m.id) && !m.meta.locked) {
-			m.x = (m.x + dx).clamp(0.0, 1.0 - m.w);
-			m.y = (m.y + dy).clamp(0.0, 1.0 - m.h);
+			m.x = (m.x + dx).clamp(0.0, (1.0 - m.w).max(0.0));
+			m.y = (m.y + dy).clamp(0.0, (1.0 - m.h).max(0.0));
 			m.meta.modified_at = Some(now);
 		}
 		for m in self.measurements.iter_mut().filter(|m| ids.contains(&m.id) && !m.meta.locked) {
@@ -247,8 +247,8 @@ impl TakeoffData {
 			self.marks.push(Mark {
 				id,
 				page,
-				x: (m.x + dx).clamp(0.0, 1.0 - m.w),
-				y: (m.y + dy).clamp(0.0, 1.0 - m.h),
+				x: (m.x + dx).clamp(0.0, (1.0 - m.w).max(0.0)),
+				y: (m.y + dy).clamp(0.0, (1.0 - m.h).max(0.0)),
 				source: Source::User,
 				status: MarkStatus::Confirmed,
 				meta: meta.clone(),

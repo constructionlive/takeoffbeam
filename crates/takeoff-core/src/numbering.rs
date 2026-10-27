@@ -20,7 +20,7 @@ struct Item<'a> {
 }
 
 fn cmp_f(a: f64, b: f64) -> Ordering {
-	a.partial_cmp(&b).unwrap_or(Ordering::Equal)
+	a.total_cmp(&b)
 }
 
 fn reading_order<'a>(mut items: Vec<Item<'a>>) -> Vec<Item<'a>> {

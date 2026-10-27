@@ -436,7 +436,8 @@ pub fn parse_dimension_text(raw: &str) -> Option<ParsedDimension> {
 	// Feet with optional inches + fraction.
 	if let Some(q) = t.find('\'') {
 		let before = t[..q].trim_end();
-		let start = before.rfind(|c: char| !(c.is_ascii_digit() || c == '.')).map(|i| i + 1).unwrap_or(0);
+		// Counted in bytes from the end: the char before the digits may be multibyte (Ø, ×).
+		let start = before.len() - before.bytes().rev().take_while(|b| b.is_ascii_digit() || *b == b'.').count();
 		let (mut value, _) = num_at(&before[start..])?;
 		let rest = t[q + 1..].trim_start().trim_start_matches('-').trim_start();
 		// inches: "6", "6 1/2", or "1/2" before a "
@@ -479,7 +480,7 @@ pub fn parse_dimension_text(raw: &str) -> Option<ParsedDimension> {
 	for unit in ["mm", "cm", "m"] {
 		if let Some(pos) = lower.find(unit) {
 			let before = lower[..pos].trim_end();
-			let start = before.rfind(|c: char| !(c.is_ascii_digit() || c == '.' || c == ',')).map(|i| i + 1).unwrap_or(0);
+			let start = before.len() - before.bytes().rev().take_while(|b| b.is_ascii_digit() || *b == b'.' || *b == b',').count();
 			let after_ok = lower[pos + unit.len()..].chars().next().is_none_or(|c| !c.is_alphabetic());
 			if start < before.len() && after_ok {
 				let v: f64 = before[start..].replace(',', ".").parse().ok()?;
@@ -616,7 +617,7 @@ pub fn calibrate(ctx: &mut ToolCtx, a: CalibrateArgs) -> Result<ToolOutput, Stri
 	cands.sort_by(|x, y| {
 		let vx = comparable(&x.parsed).map(|c| c.1).unwrap_or(0.0);
 		let vy = comparable(&y.parsed).map(|c| c.1).unwrap_or(0.0);
-		vy.partial_cmp(&vx).unwrap_or(std::cmp::Ordering::Equal)
+		vy.total_cmp(&vx)
 	});
 	let mut picked: Vec<DimCandidate> = Vec::new();
 	for c in cands {
@@ -898,6 +899,10 @@ mod tests {
 		assert_eq!(p("24"), Some((24.0, "ft".into(), false)));
 		assert_eq!(p("SITE PLAN"), None);
 		assert_eq!(p("12’-0”"), Some((12.0, "ft".into(), true)));
+		// A multibyte character right before the number (page text is anything).
+		assert_eq!(p("Ø12'-0\""), Some((12.0, "ft".into(), true)));
+		assert_eq!(p("Ø100mm"), Some((100.0, "mm".into(), true)));
+		assert_eq!(p("2×3.6 m"), Some((3.6, "m".into(), true)));
 		assert!(is_pure_dimension("22'-6\""));
 		assert!(is_pure_dimension("6015"));
 		assert!(is_pure_dimension("3.6 m"));
