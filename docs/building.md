@@ -44,17 +44,36 @@ scripts/package-windows.sh           # → dist/Takeoff-Desk-<version>-x64-setup
 The script cross-compiles with mingw-w64 (with the icon and version info embedded) and fetches:
 - `pdfium.dll`;
 - llama.cpp's **Vulkan** build, which runs on NVIDIA, AMD and Intel GPUs and falls back to CPU;
-- Microsoft's Visual C++ runtime installer, which setup runs silently only if the runtime is
-  missing.
+- the Visual C++ runtime DLLs that llama.cpp needs, taken from Microsoft's redistributable and
+  put next to the programs (app-local), so nothing needs installing system-wide.
 
 The NSIS installer adds a Start-menu and desktop shortcut, an *Open with → Takeoff Desk* entry for
-PDFs, and an uninstaller in Add/Remove Programs.
+PDFs, and an uninstaller in Add/Remove Programs. It installs either for everyone (Program Files,
+HKLM, needs admin) or for the current user only (`%LOCALAPPDATA%\Programs\Takeoff Desk`, HKCU,
+no admin). Admin accounts choose on a page and default to everyone; other accounts install for
+themselves. A later version installs in the same mode as the copy it finds. Silent installs take
+`/S` with `/CurrentUser` or `/AllUsers`.
 
 `.github/workflows/release.yml` builds the same installer natively (MSVC) on a Windows runner for
-every `v*` tag and attaches it to the GitHub release.
+every `v*` tag, installs it silently for the current user as a check, and attaches it to the
+GitHub release.
 
-The installer is not Authenticode-signed yet, so Windows SmartScreen shows "unknown publisher"
-until it has a code-signing certificate.
+### Signing
+
+The installer is not Authenticode-signed yet, so Windows SmartScreen shows "unknown publisher".
+To sign, set `WIN_SIGN` to a command that signs the file named after it, in place. The script then
+signs every exe and DLL it ships (except Microsoft's runtime, already signed by Microsoft), the
+uninstaller and the installer. For example, with Azure Artifact Signing (formerly Trusted
+Signing) and [jsign](https://ebourg.github.io/jsign/), which runs on macOS:
+
+```sh
+WIN_SIGN='jsign --storetype TRUSTEDSIGNING --keystore eus.codesigning.azure.net \
+  --storepass "$(az account get-access-token --resource https://codesigning.azure.net -q accessToken -o tsv)" \
+  --alias <account>/<certificate-profile> --tsaurl http://timestamp.acs.microsoft.com' \
+  scripts/package-windows.sh
+```
+
+On Windows, `signtool sign /fd sha256 /tr … /td sha256 …` works the same way.
 
 ## Linux
 

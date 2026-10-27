@@ -24,6 +24,17 @@ jobs:
           TARGET: x86_64-pc-windows-msvc
           MAKENSIS: "C:/Program Files (x86)/NSIS/makensis.exe"
         run: scripts/package-windows.sh
+      - name: Install for the current user, silently
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist/*-setup.exe | Select-Object -First 1).FullName
+          Start-Process $setup -ArgumentList '/S', '/CurrentUser' -Wait
+          $dir = "$env:LOCALAPPDATA\Programs\Takeoff Desk"
+          & "$dir\takeoff.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "takeoff.exe did not run" }
+          & "$dir\bin\llama-server.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "llama-server.exe did not run" }
+          if (-not (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\TakeoffDesk")) { throw "no Add/Remove Programs entry" }
       - uses: actions/upload-artifact@v4
         with:
           name: takeoff-desk-windows

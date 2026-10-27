@@ -6,6 +6,16 @@
 Applications. Everything it needs is inside the app: the PDF engine (pdfium), llama.cpp for local
 models, and the `takeoff` command-line tool (`Takeoff Desk.app/Contents/Resources/bin/takeoff`).
 
+**Windows 10/11 (x64):** run `Takeoff-Desk-<version>-x64-setup.exe`. On an administrator
+account it asks whether to install for everyone on the computer (Program Files) or only for you;
+other accounts install for themselves, in `%LOCALAPPDATA%\Programs\Takeoff Desk`, with no admin
+rights needed. Silent install: `/S`, adding `/CurrentUser` or `/AllUsers` to choose. Updates
+install where the current copy is.
+
+The Windows installer is not code-signed yet, so SmartScreen says *Windows protected your PC*
+and names an unknown publisher: choose *More info → Run anyway*. Only the macOS app is signed and
+notarized.
+
 **From source** (any platform with Rust 1.85+):
 
 ```sh
