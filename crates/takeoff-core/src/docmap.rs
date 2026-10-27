@@ -409,7 +409,7 @@ impl DocMap {
 	/// Add an area to a page; returns its new id.
 	pub fn add_part(&mut self, page: u32, mut part: Part) -> String {
 		let s = self.sheet_mut(page);
-		let n = s.parts.iter().filter_map(|p| p.id.rsplit('.').next()?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
+		let n = s.parts.iter().filter_map(|p| p.id.rsplit('.').next()?.parse::<usize>().ok()).max().unwrap_or(0).saturating_add(1);
 		part.id = part_id(page, n);
 		let id = part.id.clone();
 		s.parts.push(part);
