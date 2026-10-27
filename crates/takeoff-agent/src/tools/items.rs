@@ -146,7 +146,7 @@ pub fn find_items_at(ctx: &mut ToolCtx, a: FindArgs) -> Result<ToolOutput, Strin
 			}
 		}
 	}
-	hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+	hits.sort_by(|a, b| a.0.total_cmp(&b.0));
 	if hits.is_empty() {
 		return Ok(ToolOutput::text("No items at that location."));
 	}

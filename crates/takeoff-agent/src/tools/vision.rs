@@ -616,7 +616,7 @@ pub fn calibrate(ctx: &mut ToolCtx, a: CalibrateArgs) -> Result<ToolOutput, Stri
 	cands.sort_by(|x, y| {
 		let vx = comparable(&x.parsed).map(|c| c.1).unwrap_or(0.0);
 		let vy = comparable(&y.parsed).map(|c| c.1).unwrap_or(0.0);
-		vy.partial_cmp(&vx).unwrap_or(std::cmp::Ordering::Equal)
+		vy.total_cmp(&vx)
 	});
 	let mut picked: Vec<DimCandidate> = Vec::new();
 	for c in cands {

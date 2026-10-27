@@ -606,7 +606,7 @@ impl TakeoffData {
 		self.viewports
 			.iter()
 			.filter(|v| v.page == page && v.contains(at))
-			.min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap_or(std::cmp::Ordering::Equal))
+			.min_by(|a, b| (a.w * a.h).total_cmp(&(b.w * b.h)))
 			.map(|v| &v.scale)
 			.or_else(|| self.scale_for(page))
 	}
