@@ -156,7 +156,7 @@ pub fn layout(l: &Legend, rows: &[LegendRow], aspect: f64) -> LegendLayout {
 	let avail = (l.w - 2.0 * pad - sw - gap).max(l.w * 0.2);
 	let size = (rh * 0.62).min(avail / (total_chars as f64 * 0.56 * aspect));
 	let title = l.title();
-	let title_size = (rh * 1.5 * 0.6).min((l.w - 2.0 * pad) / (chars(title).max(1) as f64 * 0.58 * aspect)).max(size);
+	let title_size = (rh * 0.9).min(size * 1.4).min((l.w - 2.0 * pad) / (chars(title).max(1) as f64 * 0.58 * aspect)).max(size);
 	let (x0, x1) = (l.x + pad, l.x + l.w - pad);
 	let mut out = LegendLayout { texts: vec![], swatches: vec![], rules: vec![] };
 	let text = |at: Point, size: f64, text: String, right: bool, bold: bool, muted: bool| LegendText { at, size, text, right, bold, muted };
@@ -183,7 +183,9 @@ pub fn layout(l: &Legend, rows: &[LegendRow], aspect: f64) -> LegendLayout {
 	}
 	for (k, row) in rows.iter().enumerate() {
 		let top = body + rh * 0.15 + k as f64 * rh;
-		out.swatches.push(((x0, top + (rh - sh) / 2.0, sw, sh), k));
+		// Counts get a square, like their marks.
+		let w = if row.swatch == Swatch::Count { sh * aspect } else { sw };
+		out.swatches.push(((x0, top + (rh - sh) / 2.0, w, sh), k));
 		out.texts.push(text(Point { x: name_x, y: top + (rh - size) / 2.0 }, size, row.name.clone(), false, false, false));
 		for ((_, vals), rx) in numeric.iter().zip(&rights) {
 			out.texts.push(text(Point { x: *rx, y: top + (rh - size) / 2.0 }, size, vals[k].clone(), true, true, false));

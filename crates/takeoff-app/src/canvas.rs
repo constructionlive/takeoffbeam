@@ -22,6 +22,8 @@ pub enum CanvasRequest {
 	Viewport { page: u32, rect: (f64, f64, f64, f64) },
 	Depth { id: String },
 	Status(String),
+	/// Something new to set up (a space's name, a legend's options): show Properties.
+	ShowProperties,
 }
 
 enum Drag {
@@ -80,6 +82,8 @@ struct FillJob {
 	at: Vec<Point>,
 	/// Shift-click: the fill to grow, instead of a new one.
 	grow: Option<String>,
+	/// Fill Space: the outline becomes a space, not an area.
+	space: bool,
 }
 
 impl Default for Canvas {
@@ -219,6 +223,21 @@ impl Canvas {
 		let job = self.fill_job.take().unwrap();
 		use takeoff_pdf::fill::NoFill;
 		match res {
+			Some(Ok(f)) if job.space => {
+				let id = match job.grow {
+					Some(id) => {
+						doc.doc.lock().edit("Fill space", |d| {
+							if let Some(s) = d.spaces.iter_mut().find(|s| s.id == id) {
+								s.points = f.points;
+							}
+						});
+						id
+					}
+					None => self.space_added(doc, crate::spaces::add(doc, f.points)),
+				};
+				self.flash = Some(([id.clone()].into(), Instant::now()));
+				self.last_fill = Some((id, job.page, job.at));
+			}
 			Some(Ok(f)) => {
 				let id = match job.grow {
 					Some(id) => {
@@ -246,6 +265,15 @@ impl Canvas {
 			Some(Err(NoFill::Open)) => self.requests.push(CanvasRequest::Status("No closed outline around that point: the lines leave it open. Use Area and click its corners.".into())),
 			None => self.requests.push(CanvasRequest::Status("Couldn't read this page to fill it.".into())),
 		}
+	}
+
+	/// Select a space just made, with its name ready to change in Properties.
+	fn space_added(&mut self, doc: &mut OpenDoc, id: String) -> String {
+		doc.selection.clear();
+		doc.selection.insert(id.clone());
+		self.requests.push(CanvasRequest::ShowProperties);
+		self.requests.push(CanvasRequest::Status("Space added: name it in Properties".into()));
+		id
 	}
 
 	// ── Main entry ──────────────────────────────────────────────────────
@@ -442,6 +470,9 @@ impl Canvas {
 		let mut labels: Vec<(Pos2, String, Color32, bool)> = Vec::new();
 		let to = |pt: &Point| doc.to_screen(*pt);
 		let sw = |w: f32| (w * zoom).clamp(1.0, 6.0);
+
+		// Spaces under everything.
+		crate::spaces::paint(painter, doc, data, &flash, p);
 
 		// Annotations under quantities.
 		for a in data.annotations.iter().filter(|a| a.page == page) {
@@ -650,6 +681,8 @@ impl Canvas {
 			painter.extend(v);
 			painter.text(r.left_top() + Vec2::new(6.0, 4.0), Align2::LEFT_TOP, format!("{} · {} {}", vp.name, trim(vp.scale.distance), vp.scale.unit), theme::medium(11.0), p.warning);
 		}
+		// Legends on top.
+		crate::legends::paint(painter, doc, &d, &flash, p);
 	}
 
 	fn paint_overlays(&mut self, painter: &egui::Painter, doc: &OpenDoc, p: &Palette) {
@@ -757,7 +790,7 @@ impl Canvas {
 		let accent = p.accent;
 		let stroke = Stroke::new(2.0, accent);
 		if !self.points.is_empty() {
-			let closed = matches!(self.tool, Tool::Area | Tool::Volume | Tool::Cutout | Tool::Annot(AnnotationKind::Polygon | AnnotationKind::Cloud));
+			let closed = matches!(self.tool, Tool::Area | Tool::Volume | Tool::Cutout | Tool::Space | Tool::Annot(AnnotationKind::Polygon | AnnotationKind::Cloud));
 			// The run as it will be stored: curved through the cursor, or traced along the line so far.
 			let mut page_pts = self.points.clone();
 			if let Some(c) = cursor {
@@ -903,6 +936,9 @@ impl Canvas {
 		let d = doc.doc.lock();
 		let data = &d.data;
 		let page = doc.page;
+		if let Some(id) = crate::legends::hit(doc, data, pos) {
+			return Some(id);
+		}
 		let hidden: HashSet<&str> = data.categories.iter().filter(|c| c.hidden).map(|c| c.id.as_str()).collect();
 		let vis = |c: &Option<String>| !c.as_deref().is_some_and(|c| hidden.contains(c));
 		for m in data.marks.iter().rev().filter(|m| m.page == page && vis(&m.category_id)) {
@@ -933,7 +969,7 @@ impl Canvas {
 				return Some(a.id.clone());
 			}
 		}
-		None
+		crate::spaces::hit(doc, data, pos)
 	}
 
 	/// A vertex or resize handle of a selected item under the cursor.
@@ -965,6 +1001,12 @@ impl Canvas {
 			if let Some(c) = corners.iter().position(near) {
 				return Some(Drag::Resize { id, corner: c });
 			}
+		}
+		if let Some(idx) = d.data.spaces.iter().find(|s| s.id == id).and_then(|s| s.points.iter().position(near)) {
+			return Some(Drag::Vertex { id, idx, cutout: None });
+		}
+		if let Some(corner) = d.data.legends.iter().find(|l| l.id == id).and_then(|l| crate::legends::corner_at(doc, l, pos)) {
+			return Some(Drag::Resize { id, corner });
 		}
 		None
 	}
@@ -1088,18 +1130,22 @@ impl Canvas {
 					}
 				}
 			}
-			Tool::Fill => {
+			Tool::Fill | Tool::SpaceFill => {
 				ui.ctx().set_cursor_icon(if self.fill_job.is_some() { CursorIcon::Progress } else { CursorIcon::Crosshair });
 				if resp.clicked() && in_canvas && self.fill_job.is_none() {
 					let raw = doc.to_page(pos);
+					let space = self.tool == Tool::SpaceFill;
 					// Shift-click: another piece of the last fill, filled together with it.
-					let grow = self.last_fill.clone().filter(|(id, page, _)| mods.shift && *page == doc.page && doc.doc.lock().data.measurements.iter().any(|m| &m.id == id));
+					let grow = self.last_fill.clone().filter(|(id, page, _)| {
+						let d = doc.doc.lock();
+						mods.shift && *page == doc.page && if space { d.data.spaces.iter().any(|s| &s.id == id) } else { d.data.measurements.iter().any(|m| &m.id == id) }
+					});
 					let at = match &grow {
 						Some((_, _, at)) => at.iter().copied().chain([raw]).collect(),
 						None => vec![raw],
 					};
 					let token = doc.request_fill(at.clone());
-					self.fill_job = Some(FillJob { token, page: doc.page, at, grow: grow.map(|g| g.0) });
+					self.fill_job = Some(FillJob { token, page: doc.page, at, grow: grow.map(|g| g.0), space });
 				}
 			}
 			Tool::FollowLine => {
@@ -1128,7 +1174,7 @@ impl Canvas {
 					}
 				}
 			}
-			Tool::RectArea | Tool::Viewport | Tool::Annot(AnnotationKind::Rectangle | AnnotationKind::Ellipse | AnnotationKind::Highlight | AnnotationKind::Text | AnnotationKind::Stamp | AnnotationKind::Line | AnnotationKind::Arrow) => {
+			Tool::RectArea | Tool::Viewport | Tool::Legend | Tool::Annot(AnnotationKind::Rectangle | AnnotationKind::Ellipse | AnnotationKind::Highlight | AnnotationKind::Text | AnnotationKind::Stamp | AnnotationKind::Line | AnnotationKind::Arrow) => {
 				ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
 				if resp.drag_started() && in_canvas {
 					self.drag = Some(Drag::Shape { start: start_pt });
@@ -1137,6 +1183,8 @@ impl Canvas {
 					if let Some(Drag::Shape { start }) = self.drag.take() {
 						self.finish_shape(doc, start, pt);
 					}
+				} else if resp.clicked() && in_canvas && self.tool == Tool::Legend {
+					self.finish_shape(doc, pt, pt);
 				} else if resp.clicked() && in_canvas && matches!(self.tool, Tool::Annot(AnnotationKind::Text | AnnotationKind::Stamp)) {
 					// Click without drag: a default-size box.
 					let (w, h) = doc.page_size(doc.page);
@@ -1252,6 +1300,11 @@ impl Canvas {
 							*v = pt;
 						}
 						a.meta.modified_at = Some(now_ms());
+					} else if let Some(s) = d.spaces.iter_mut().find(|s| s.id == id) {
+						if let Some(v) = s.points.get_mut(idx) {
+							*v = pt;
+						}
+						s.meta.modified_at = Some(now_ms());
 					}
 				});
 			}
@@ -1273,6 +1326,8 @@ impl Canvas {
 							m.w = (pt.x - m.x).max(0.001);
 							m.h = (pt.y - m.y).max(0.001);
 						}
+					} else if let Some(l) = d.legends.iter_mut().find(|l| l.id == id) {
+						crate::legends::resize(l, corner, pt);
 					}
 				});
 			}
@@ -1367,6 +1422,16 @@ impl Canvas {
 				out.push(a.id.clone());
 			}
 		}
+		for s in d.data.spaces.iter().filter(|s| s.page == page && !s.hidden) {
+			if s.points.iter().all(inside) {
+				out.push(s.id.clone());
+			}
+		}
+		for l in d.data.legends.iter().filter(|l| l.page == page) {
+			if inside(&Point { x: l.x, y: l.y }) && inside(&Point { x: l.x + l.w, y: l.y + l.h }) {
+				out.push(l.id.clone());
+			}
+		}
 		out
 	}
 
@@ -1392,7 +1457,7 @@ impl Canvas {
 	fn finish_shape(&mut self, doc: &mut OpenDoc, a: Point, b: Point) {
 		let (w, h) = doc.page_size(doc.page);
 		let tiny = ((a.x - b.x) * w).abs() < 2.0 && ((a.y - b.y) * h).abs() < 2.0;
-		if tiny && !matches!(self.tool, Tool::Annot(AnnotationKind::Text | AnnotationKind::Stamp)) {
+		if tiny && !matches!(self.tool, Tool::Legend | Tool::Annot(AnnotationKind::Text | AnnotationKind::Stamp)) {
 			return;
 		}
 		let (tl, br) = (Point { x: a.x.min(b.x), y: a.y.min(b.y) }, Point { x: a.x.max(b.x), y: a.y.max(b.y) });
@@ -1406,6 +1471,12 @@ impl Canvas {
 			}
 			Tool::Viewport => {
 				self.requests.push(CanvasRequest::Viewport { page: doc.page, rect: (tl.x, tl.y, br.x - tl.x, br.y - tl.y) });
+			}
+			Tool::Legend => {
+				let id = crate::legends::add(doc, tl, br);
+				doc.selection.clear();
+				doc.selection.insert(id);
+				self.requests.push(CanvasRequest::ShowProperties);
 			}
 			Tool::Annot(kind @ (AnnotationKind::Line | AnnotationKind::Arrow)) => {
 				let ann = self.new_annotation(doc, kind, vec![a, b]);
@@ -1425,7 +1496,7 @@ impl Canvas {
 
 	/// Whether the tool draws a run the curve mode applies to.
 	fn curves(&self) -> bool {
-		matches!(self.tool, Tool::Length | Tool::Curve | Tool::Trace | Tool::CurveMarkup | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout)
+		matches!(self.tool, Tool::Length | Tool::Curve | Tool::Trace | Tool::CurveMarkup | Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout | Tool::Space)
 	}
 
 	/// How this tool joins its points: the Curve and Trace tools always
@@ -1502,7 +1573,7 @@ impl Canvas {
 		self.follow_cache = None;
 		let page = doc.page;
 		let pts = if self.curves() && raw.len() >= 2 {
-			let closed = matches!(self.tool, Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout);
+			let closed = matches!(self.tool, Tool::Perimeter | Tool::Area | Tool::Volume | Tool::Cutout | Tool::Space);
 			self.shape(doc, &raw, closed).0
 		} else {
 			raw
@@ -1535,6 +1606,10 @@ impl Canvas {
 						}
 					});
 				}
+			}
+			Tool::Space if pts.len() >= 3 => {
+				let id = crate::spaces::add(doc, pts);
+				self.space_added(doc, id);
 			}
 			Tool::Angle if pts.len() == 3 => {
 				let mut m = Measurement::new(new_id("ms"), page, MeasurementType::Angle, pts);

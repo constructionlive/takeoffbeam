@@ -1219,6 +1219,10 @@ impl TakeoffApp {
 				}
 				CanvasRequest::Depth { id } => self.dialog = Some(Dialog::Depth { id, value: String::new() }),
 				CanvasRequest::Status(s) => self.toast(s, false),
+				CanvasRequest::ShowProperties => {
+					self.settings.right_panel = true;
+					self.right.tab = 1;
+				}
 			}
 		}
 	}
@@ -1730,7 +1734,12 @@ impl TakeoffApp {
 		let name = if summary { format!("{stem} quantities.csv") } else { format!("{stem} markups.csv") };
 		let Some(dst) = rfd::FileDialog::new().set_file_name(name).add_filter("CSV", &["csv"]).save_file() else { return };
 		let doc = d.doc.lock();
-		let csv = if summary { takeoff_core::list::summary_csv(&takeoff_core::list::summary(&doc)) } else { takeoff_core::list::rows_csv(&doc, &takeoff_core::list::rows(&doc)) };
+		// With spaces, the summary is per space (a Space column first).
+		let csv = match summary {
+			true if !doc.data.spaces.is_empty() => takeoff_core::list::space_summary_csv(&takeoff_core::list::summary_by_space(&doc)),
+			true => takeoff_core::list::summary_csv(&takeoff_core::list::summary(&doc)),
+			false => takeoff_core::list::rows_csv(&doc, &takeoff_core::list::rows(&doc)),
+		};
 		drop(doc);
 		match std::fs::write(&dst, csv) {
 			Ok(()) => self.toast("Exported CSV", false),
