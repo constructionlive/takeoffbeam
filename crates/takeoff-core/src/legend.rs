@@ -84,6 +84,13 @@ pub fn rows(doc: &Document, l: &Legend) -> Vec<LegendRow> {
 	out
 }
 
+/// The rows of a legend from the takeoff alone (exports, renders): page
+/// sizes come from its `pages`.
+pub fn rows_for(data: &TakeoffData, l: &Legend) -> Vec<LegendRow> {
+	let sizes = data.pages.iter().map(|p| (p.width_px * 72.0 / 200.0, p.height_px * 72.0 / 200.0)).collect();
+	rows(&Document::new(data.clone(), sizes, ""), l)
+}
+
 /// A piece of text in a legend. `at` is the top-left of its line, or the
 /// top-right when `right` is set.
 #[derive(Debug, Clone, PartialEq)]
@@ -289,6 +296,13 @@ mod tests {
 		assert_eq!(rows(&doc, &l)[0].count, 3);
 		doc.edit("scale", |d| d.page_scales[0].distance = 20.0);
 		assert_eq!(rows(&doc, &l)[1].quantity, "100.00 ft");
+	}
+
+	#[test]
+	fn rows_from_the_data_alone_match() {
+		let doc = doc();
+		let l = Legend::new("lg", 1, 0.7, 0.7, 0.25, 0.2);
+		assert_eq!(rows_for(&doc.data, &l), rows(&doc, &l));
 	}
 
 	#[test]

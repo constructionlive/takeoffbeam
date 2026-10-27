@@ -130,6 +130,46 @@ fn cloud_points(pts: &[Point], aspect: f64) -> Vec<Point> {
 	out
 }
 
+/// A legend box drawn as vector content, from the same layout as the canvas.
+fn legend(p: &mut Painter, l: &Legend, data: &TakeoffData, aspect: f64, page_h_pt: f64) -> Result<(), PdfiumError> {
+	use takeoff_core::legend::{hatch_lines, layout, rows_for, text_width, Swatch};
+	let rows = rows_for(data, l);
+	let lay = layout(l, &rows, aspect);
+	let ink = "#282828";
+	let frame = p.rect(Point { x: l.x, y: l.y }, Point { x: l.x + l.w, y: l.y + l.h });
+	p.shape(&frame, true, Some((color(ink, 1.0), 0.8)), Some(color("#FFFFFF", 0.94)), None)?;
+	for (a, b) in &lay.rules {
+		p.shape(&[*a, *b], false, Some((color("#969696", 1.0), 0.5)), None, None)?;
+	}
+	for ((x, y, w, h), k) in &lay.swatches {
+		let row = &rows[*k];
+		let r = p.rect(Point { x: *x, y: *y }, Point { x: x + w, y: y + h });
+		match row.swatch {
+			Swatch::Count => p.shape(&r, true, Some((color(&row.color, 1.0), 1.0)), Some(color(&row.color, 0.18 * row.opacity)), None)?,
+			Swatch::Length(style) => {
+				let dash: Option<&[f32]> = match style { Some(LineStyle::Dashed) => Some(&[4.0, 3.0]), Some(LineStyle::Dotted) => Some(&[0.5, 2.0]), _ => None };
+				p.shape(&[Point { x: *x, y: y + h / 2.0 }, Point { x: x + w, y: y + h / 2.0 }], false, Some((color(&row.color, 1.0), 1.5)), None, dash)?;
+			}
+			Swatch::Area(hk) => {
+				p.shape(&r, true, None, Some(color(&row.color, 0.25 * row.opacity)), None)?;
+				for (a, b) in hk.map(|hk| hatch_lines((*x, *y, *w, *h), hk, aspect, 6)).unwrap_or_default() {
+					p.shape(&[a, b], false, Some((color(&row.color, 0.8), 0.5)), None, None)?;
+				}
+				p.shape(&r, true, Some((color(&row.color, 1.0), 0.8)), None, None)?;
+			}
+			Swatch::Markup(_) => p.shape(&r, true, Some((color(&row.color, row.opacity), 1.0)), None, None)?,
+		}
+	}
+	for t in &lay.texts {
+		let mut at = t.at;
+		if t.right {
+			at.x -= text_width(&t.text, t.size, aspect);
+		}
+		p.text(at, (t.size * page_h_pt) as f32, &t.text, if t.muted { "#6E6E6E" } else { ink })?;
+	}
+	Ok(())
+}
+
 /// Write `src` with the takeoff drawn in to `dst`.
 pub fn export_flattened(src: &Path, data: &TakeoffData, dst: &Path) -> Result<u32, PdfError> {
 	let mut doc = pdfium()?.load_pdf_from_file(src, None)?;
@@ -140,7 +180,7 @@ pub fn export_flattened(src: &Path, data: &TakeoffData, dst: &Path) -> Result<u3
 	let disp = &data.display;
 	let mut pages_done = 0;
 	for page_no in 1..=n {
-		let has = data.marks.iter().any(|m| m.page == page_no) || data.measurements.iter().any(|m| m.page == page_no) || data.annotations.iter().any(|a| a.page == page_no);
+		let has = data.marks.iter().any(|m| m.page == page_no) || data.measurements.iter().any(|m| m.page == page_no) || data.annotations.iter().any(|a| a.page == page_no) || data.legends.iter().any(|l| l.page == page_no);
 		if !has {
 			continue;
 		}
@@ -226,6 +266,10 @@ pub fn export_flattened(src: &Path, data: &TakeoffData, dst: &Path) -> Result<u3
 			p.shape(&r, true, Some((color(&hex, 1.0), 1.0)), Some(color(&hex, 0.15)), None)?;
 			let n = mseq.get(&m.id).copied().unwrap_or(0);
 			p.text(Point { x: m.x, y: m.y - pt * 7.0 / aspect }, 6.0, &n.to_string(), &hex)?;
+		}
+		let page_h_pt = p.page.height().value as f64;
+		for l in data.legends.iter().filter(|l| l.page == page_no) {
+			legend(&mut p, l, data, aspect, page_h_pt)?;
 		}
 		p.page.regenerate_content()?;
 		pages_done += 1;
