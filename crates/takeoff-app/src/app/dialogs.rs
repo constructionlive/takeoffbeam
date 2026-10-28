@@ -431,10 +431,20 @@ impl TakeoffApp {
 							ui.add(egui::ProgressBar::new(frac).desired_width(160.0).text(format!("{:.0} / {:.0} MB", *done as f64 / 1e6, *total as f64 / 1e6)).fill(p.accent_fill));
 						}
 						DownloadState::Done(path) => {
-							if ui.add(egui::Button::new(RichText::new(format!("{}  Open installer", i::EXTERNAL_LINK)).color(p.on_accent)).fill(p.accent_fill)).on_hover_text(path.display().to_string()).clicked() {
-								let _ = open::that(path);
+							if let Some(e) = &self.updater.install_error {
+								if ui.add(egui::Button::new(RichText::new(format!("{}  Open installer", i::EXTERNAL_LINK)).color(p.on_accent)).fill(p.accent_fill)).on_hover_text(path.display().to_string()).clicked() {
+									let _ = open::that(path);
+								}
+								ui.label(RichText::new("Couldn't update in place — quit Takeoff Desk, then install").size(12.0).color(p.text2)).on_hover_text(e);
+							} else {
+								if ui.add(egui::Button::new(RichText::new(format!("{}  Restart to update", i::DOWNLOAD)).color(p.on_accent).font(theme::semibold(12.5))).fill(p.accent_fill).corner_radius(4)).on_hover_text("Saves your work, installs the update and opens Takeoff Desk again").clicked() {
+									match updates::install_on_exit(path) {
+										Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+										Err(e) => self.updater.install_error = Some(e),
+									}
+								}
+								ui.label(RichText::new("Downloaded").size(12.0).color(p.text2));
 							}
-							ui.label(RichText::new("Downloaded — quit Takeoff Desk, then install").size(12.0).color(p.text2));
 						}
 						DownloadState::Failed(e) => {
 							if ui.button("Open download page").clicked() {

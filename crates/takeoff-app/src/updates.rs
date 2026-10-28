@@ -1,6 +1,7 @@
 //! Update tracker: the app checks a small JSON feed we publish
 //! (`scripts/publish-update.sh`) and tells the user when a newer version is
-//! out, with what's new and a one-click download of the right installer.
+//! out, with what's new. One click downloads the installer; a second quits,
+//! swaps the new version in and starts it again (see [`install_on_exit`]).
 //!
 //! Feed (`latest.json`):
 //! { "version": "0.0.2", "date": "2026-11-01", "notes": "…", "critical": false,
@@ -89,6 +90,8 @@ pub struct Updater {
 	/// The user asked from the menu: say "you're up to date" too.
 	pub manual: bool,
 	pub dismissed: bool,
+	/// Why the last in-place install could not start (the banner offers the installer instead).
+	pub install_error: Option<String>,
 }
 
 fn client() -> reqwest::blocking::Client {
@@ -155,7 +158,7 @@ fn fetch() -> Result<Release, String> {
 
 impl Updater {
 	pub fn new() -> Self {
-		Self { shared: Arc::new(Mutex::new(Shared::default())), last_check: None, manual: false, dismissed: false }
+		Self { shared: Arc::new(Mutex::new(Shared::default())), last_check: None, manual: false, dismissed: false, install_error: None }
 	}
 
 	/// Kick off a background check now.
@@ -219,8 +222,8 @@ impl Updater {
 		self.shared.lock().download.clone().unwrap_or(DownloadState::Idle)
 	}
 
-	/// Download the installer into ~/Downloads, then open it (mounts the dmg /
-	/// runs the setup). Falls back to the browser when there is no direct link.
+	/// Download the installer into ~/Downloads, ready for [`install_on_exit`].
+	/// Falls back to the browser when there is no direct link.
 	pub fn download_and_open(&mut self, rel: &Release, ctx: &eframe::egui::Context) {
 		let Some(url) = rel.download_for_this_platform().cloned() else {
 			let _ = open::that(if rel.page.is_empty() { RELEASES_PAGE } else { &rel.page });
@@ -263,16 +266,118 @@ impl Updater {
 				Ok(dst)
 			})();
 			let state = match result {
-				Ok(p) => {
-					let _ = open::that(&p);
-					DownloadState::Done(p)
-				}
+				Ok(p) => DownloadState::Done(p),
 				Err(e) => DownloadState::Failed(e),
 			};
 			shared.lock().download = Some(state);
 			ctx.request_repaint();
 		});
 	}
+}
+
+/// Hand the downloaded installer to a helper that waits for this process to
+/// exit, installs it over this copy and starts the new version. `Ok` means the
+/// helper is waiting and the app should close; on `Err` nothing has changed and
+/// the caller can open the installer for the user instead.
+pub fn install_on_exit(installer: &std::path::Path) -> Result<(), String> {
+	stage(installer)
+}
+
+/// macOS: mount the dmg, check the new app is signed by the same team as this
+/// one, copy it next to this bundle, then swap the two once we have quit.
+#[cfg(target_os = "macos")]
+fn stage(installer: &std::path::Path) -> Result<(), String> {
+	use std::path::Path;
+	use std::process::{Command, Stdio};
+
+	fn run(cmd: &str, args: &[&std::ffi::OsStr]) -> Result<std::process::Output, String> {
+		let out = Command::new(cmd).args(args).output().map_err(|e| format!("{cmd}: {e}"))?;
+		if out.status.success() { Ok(out) } else { Err(format!("{cmd}: {}", String::from_utf8_lossy(&out.stderr).trim())) }
+	}
+	// "TeamIdentifier=…" from codesign -dv; None for ad-hoc (local) builds.
+	fn team(app: &Path) -> Option<String> {
+		let out = Command::new("codesign").arg("-dv").arg(app).output().ok()?;
+		let text = String::from_utf8_lossy(&out.stderr).into_owned();
+		text.lines().find_map(|l| l.strip_prefix("TeamIdentifier=")).filter(|t| *t != "not set").map(str::to_string)
+	}
+
+	let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+	let bundle = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")).ok_or("not running from an .app bundle")?.to_path_buf();
+	if bundle.to_string_lossy().contains("/AppTranslocation/") {
+		return Err("Takeoff Desk is running from the disk image or Downloads; move it to Applications first".into());
+	}
+	let parent = bundle.parent().ok_or("no folder above the app")?;
+	let staged = parent.join(".Takeoff Desk.app.update");
+	let mnt = std::env::temp_dir().join(format!("takeoff-update-{}", std::process::id()));
+	std::fs::create_dir_all(&mnt).map_err(|e| e.to_string())?;
+	run("hdiutil", &["attach".as_ref(), installer.as_os_str(), "-nobrowse".as_ref(), "-readonly".as_ref(), "-noautoopen".as_ref(), "-mountpoint".as_ref(), mnt.as_os_str()])?;
+	let copied = (|| -> Result<(), String> {
+		let new_app = std::fs::read_dir(&mnt)
+			.map_err(|e| e.to_string())?
+			.filter_map(|e| e.ok().map(|e| e.path()))
+			.find(|p| p.extension().is_some_and(|e| e == "app"))
+			.ok_or("no app in the disk image")?;
+		run("codesign", &["--verify".as_ref(), "--deep".as_ref(), "--strict".as_ref(), new_app.as_os_str()]).map_err(|e| format!("the downloaded app's signature is not valid ({e})"))?;
+		if let Some(ours) = team(&bundle) {
+			if team(&new_app).as_deref() != Some(ours.as_str()) {
+				return Err("the downloaded app is not signed by the same developer".into());
+			}
+		}
+		let _ = std::fs::remove_dir_all(&staged);
+		run("ditto", &[new_app.as_os_str(), staged.as_os_str()])?;
+		Ok(())
+	})();
+	let _ = run("hdiutil", &["detach".as_ref(), mnt.as_os_str(), "-force".as_ref()]);
+	let _ = std::fs::remove_dir(&mnt);
+	if let Err(e) = copied {
+		let _ = std::fs::remove_dir_all(&staged);
+		return Err(e);
+	}
+	// $1 pid, $2 this bundle, $3 the staged copy. Puts the old one back if the swap fails.
+	const SWAP: &str = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+old="$2.old.$$"
+if mv "$2" "$old"; then
+	if mv "$3" "$2"; then rm -rf "$old"; else mv "$old" "$2"; fi
+fi
+open "$2""#;
+	Command::new("/bin/sh")
+		.args(["-c", SWAP, "takeoff-update"])
+		.arg(std::process::id().to_string())
+		.arg(&bundle)
+		.arg(&staged)
+		.stdin(Stdio::null())
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.spawn()
+		.map_err(|e| e.to_string())?;
+	Ok(())
+}
+
+/// Windows: once we have quit, run the setup silently (it keeps the install
+/// mode and folder of the copy already there), then start the app again.
+#[cfg(windows)]
+fn stage(installer: &std::path::Path) -> Result<(), String> {
+	use std::os::windows::process::CommandExt;
+	const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+	let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+	let quote = |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "''"));
+	let script = format!(
+		"Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath {} -ArgumentList '/S' -Wait; Start-Process -FilePath {}",
+		std::process::id(),
+		quote(installer),
+		quote(&exe)
+	);
+	std::process::Command::new("powershell")
+		.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+		.creation_flags(CREATE_NO_WINDOW)
+		.spawn()
+		.map_err(|e| e.to_string())?;
+	Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn stage(_installer: &std::path::Path) -> Result<(), String> {
+	Err("updating in place is not supported on this system".into())
 }
 
 /// mailto: link for the Feedback button, with version and system details filled in.
