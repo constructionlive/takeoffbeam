@@ -118,11 +118,17 @@ fi
 
 echo "› building dmg"
 DMG="$DIST/Takeoff-Desk-${VERSION}-${ARCH}.dmg"
+# A blank image mounted at a private folder, not -srcfolder: that mounts under
+# /Volumes, where macOS refuses to let the terminal read a Developer ID app back.
 STAGE="$(mktemp -d)"
-cp -a "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
+mkdir "$STAGE/mnt"
+hdiutil create -quiet -size "$(( $(du -sm "$APP" | cut -f1) + 64 ))m" -fs HFS+ -volname "Takeoff Desk" "$STAGE/rw.dmg"
+hdiutil attach -quiet -nobrowse -noautoopen -mountpoint "$STAGE/mnt" "$STAGE/rw.dmg"
+ditto "$APP" "$STAGE/mnt/$(basename "$APP")"
+ln -s /Applications "$STAGE/mnt/Applications"
+hdiutil detach -quiet -force "$STAGE/mnt"
 rm -f "$DMG"
-hdiutil create -quiet -volname "Takeoff Desk" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+hdiutil convert -quiet "$STAGE/rw.dmg" -format UDZO -o "$DMG"
 rm -rf "$STAGE"
 [ -n "${SIGN_IDENTITY:-}" ] && codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
 
