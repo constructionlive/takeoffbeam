@@ -80,9 +80,14 @@ pub fn run(cmd: EvalCmd) -> Result<(), String> {
 			let list = pick(&cases, only.as_deref(), |c| c.task.is_some())?;
 			let mut rep = Report::new();
 			for m in &model.models {
-				let (provider, _server) = crate::provider(model.base_url.clone(), model.api_key.clone(), m.clone(), model.context)?;
+				// `claude:<model>` / `codex:<model>`: the subscription CLI, as in the app.
+				let channel = m.split_once(':').and_then(|(k, id)| takeoff_agent::channel::Channel::from_key(k).map(|c| (c, id.to_string())));
+				let (provider, _server) = match &channel {
+					Some(_) => (takeoff_agent::ProviderConfig { base_url: String::new(), api_key: None, model: m.clone(), context_tokens: model.context, vision: true }, None),
+					None => crate::provider(model.base_url.clone(), model.api_key.clone(), m.clone(), model.context)?,
+				};
 				let keep = report_path(&report, &cases, "run", &rep).with_extension("takeoffs");
-				let opts = eval::RunOptions { provider, timeout: Duration::from_secs(timeout), workspace: workspace.clone(), keep: Some(keep) };
+				let opts = eval::RunOptions { provider, timeout: Duration::from_secs(timeout), workspace: workspace.clone(), keep: Some(keep), channel };
 				for case in &list {
 					for n in 1..=repeat.max(1) {
 						eprintln!("── {} · {}{}", case.name, m, if repeat > 1 { format!(" · run {n}") } else { String::new() });

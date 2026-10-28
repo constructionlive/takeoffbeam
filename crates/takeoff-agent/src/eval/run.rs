@@ -14,6 +14,7 @@ use takeoff_core::{Document, MeasurementType, TakeoffData};
 
 use super::{Case, Expect};
 use crate::session::Msg;
+use crate::channel::{self, Channel, ChannelTurn, ToolHost};
 use crate::{start_turn, AgentContext, AgentEvent, ChatSession, ProviderConfig};
 
 pub struct RunOptions {
@@ -24,6 +25,9 @@ pub struct RunOptions {
 	pub workspace: Option<PathBuf>,
 	/// Save each case's resulting takeoff here as `<case>.takeoff.json`.
 	pub keep: Option<PathBuf>,
+	/// Run on a subscription CLI (Claude Code, Codex) with this model ("" = its
+	/// default) instead of `provider`, the tools served over MCP as in the app.
+	pub channel: Option<(Channel, String)>,
 }
 
 /// One expectation, scored.
@@ -72,7 +76,10 @@ pub struct CaseResult {
 
 /// Run `case`'s task. `on_event` sees the agent's events as they come (progress).
 pub fn run_case(case: &Case, opts: &RunOptions, on_event: &mut dyn FnMut(&AgentEvent)) -> CaseResult {
-	let mut r = CaseResult { case: case.name.clone(), model: opts.provider.model.clone(), base_url: opts.provider.base_url.clone(), ..Default::default() };
+	let mut r = match &opts.channel {
+		Some((ch, model)) => CaseResult { case: case.name.clone(), model: format!("{}:{}", ch.key(), if model.is_empty() { "default" } else { model }), base_url: ch.name().into(), ..Default::default() },
+		None => CaseResult { case: case.name.clone(), model: opts.provider.model.clone(), base_url: opts.provider.base_url.clone(), ..Default::default() },
+	};
 	let Some(task) = &case.task else {
 		r.skipped = Some("no task".into());
 		return r;
@@ -109,10 +116,35 @@ pub fn run_case(case: &Case, opts: &RunOptions, on_event: &mut dyn FnMut(&AgentE
 	}
 	let doc = Arc::new(Mutex::new(Document::new(data, sizes, "AI")));
 	let session = Arc::new(Mutex::new(ChatSession::new()));
-	let ctx = AgentContext { doc: doc.clone(), pdf_path: pdf, current_page: case.page, visible_region: None, selected_ids: vec![], provider: opts.provider.clone(), workspace: opts.workspace.clone(), others: vec![], attachments: vec![], images: vec![] };
 	let timeout = task.timeout_secs.map(Duration::from_secs).unwrap_or(opts.timeout);
 	let t0 = Instant::now();
-	let turn = start_turn(session.clone(), ctx, task.prompt.clone());
+	// Held for the turn: the CLI's tool calls come back through it.
+	let mut _host = None;
+	let turn = match &opts.channel {
+		Some((ch, model)) => {
+			let Some(exe) = channel::find_exe(*ch) else {
+				r.skipped = Some(format!("{} is not installed", ch.name()));
+				return r;
+			};
+			let host = match ToolHost::start(doc.clone(), pdf.clone()) {
+				Ok(h) => h,
+				Err(e) => {
+					r.skipped = Some(e);
+					return r;
+				}
+			};
+			let workdir = std::env::temp_dir().join(format!("takeoff-eval-{}", ch.key()));
+			let _ = std::fs::create_dir_all(&workdir);
+			let ct = ChannelTurn { channel: *ch, exe, model: model.clone(), workdir, workspace: opts.workspace.clone(), others: vec![], attachments: vec![], images: vec![], sweeps: None, current_page: case.page, visible_region: None, selected_ids: vec![] };
+			let t = channel::start_turn(&host, session.clone(), ct, task.prompt.clone());
+			_host = Some(host);
+			t
+		}
+		None => {
+			let ctx = AgentContext { doc: doc.clone(), pdf_path: pdf, current_page: case.page, visible_region: None, selected_ids: vec![], provider: opts.provider.clone(), workspace: opts.workspace.clone(), others: vec![], attachments: vec![], images: vec![] };
+			start_turn(session.clone(), ctx, task.prompt.clone())
+		}
+	};
 	let mut said = String::new();
 	loop {
 		if t0.elapsed() > timeout && !turn.is_cancelled() {

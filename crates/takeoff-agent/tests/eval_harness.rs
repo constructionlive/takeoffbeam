@@ -169,6 +169,7 @@ fn a_scripted_run_scores_what_it_marked() {
 		timeout: Duration::from_secs(60),
 		workspace: None,
 		keep: Some(std::env::temp_dir().join(format!("takeoff-eval-keep-{}", std::process::id()))),
+		channel: None,
 	};
 	let mut events = 0;
 	let r = eval::run_case(&case("symbols.json"), &opts, &mut |_| events += 1);
@@ -206,7 +207,7 @@ fn a_scripted_run_scores_what_it_marked() {
 fn missing_drawings_are_skipped_not_failed() {
 	let mut c = case("symbols.json");
 	c.pdf = "nowhere/missing.pdf".into();
-	let opts = eval::RunOptions { provider: ProviderConfig { base_url: "http://127.0.0.1:9/v1".into(), api_key: None, model: "m".into(), context_tokens: 8192, vision: true }, timeout: Duration::from_secs(5), workspace: None, keep: None };
+	let opts = eval::RunOptions { provider: ProviderConfig { base_url: "http://127.0.0.1:9/v1".into(), api_key: None, model: "m".into(), context_tokens: 8192, vision: true }, timeout: Duration::from_secs(5), workspace: None, keep: None, channel: None };
 	let r = eval::run_case(&c, &opts, &mut |_| {});
 	assert!(r.skipped.as_deref().is_some_and(|s| s.contains("drawing not found")), "{r:?}");
 	assert!(eval::probe_case(&c, &opts.provider, Dialect::Pixel)[0].error.is_some());
@@ -274,9 +275,13 @@ fn save(rep: &Report) {
 }
 
 #[test]
-#[ignore = "needs a real model: TAKEOFF_BASE_URL, TAKEOFF_MODEL"]
+#[ignore = "needs a real model: TAKEOFF_BASE_URL, TAKEOFF_MODEL (or TAKEOFF_MODEL=claude:<model>)"]
 fn live_run() {
-	let opts = eval::RunOptions { provider: live_provider(), timeout: Duration::from_secs(std::env::var("TAKEOFF_TIMEOUT").ok().and_then(|t| t.parse().ok()).unwrap_or(1800)), workspace: None, keep: None };
+	// `claude:haiku` and the like run on the subscription CLI; it serves the
+	// tools through a bridge process, which is the CLI (TAKEOFF_BRIDGE_EXE).
+	let channel = std::env::var("TAKEOFF_MODEL").ok().and_then(|m| m.split_once(':').and_then(|(k, id)| takeoff_agent::channel::Channel::from_key(k).map(|c| (c, id.to_string()))));
+	let provider = if channel.is_some() { ProviderConfig { base_url: String::new(), api_key: None, model: String::new(), context_tokens: 0, vision: true } } else { live_provider() };
+	let opts = eval::RunOptions { provider, timeout: Duration::from_secs(std::env::var("TAKEOFF_TIMEOUT").ok().and_then(|t| t.parse().ok()).unwrap_or(1800)), workspace: None, keep: None, channel };
 	let mut rep = Report::new();
 	for c in live_cases().iter().filter(|c| c.task.is_some()) {
 		println!("── {}", c.name);

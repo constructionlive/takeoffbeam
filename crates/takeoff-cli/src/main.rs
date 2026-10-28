@@ -454,6 +454,12 @@ fn short(s: &str, n: usize) -> String {
 }
 
 fn main() -> ExitCode {
+	// A subscription CLI (Claude Code, Codex) reaches the drawing tools through
+	// this executable, as it does through the app's (see `takeoff eval run --model claude:…`).
+	let args: Vec<String> = std::env::args().collect();
+	if args.get(1).map(String::as_str) == Some(takeoff_agent::channel::BRIDGE_ARG) {
+		std::process::exit(takeoff_agent::channel::run_bridge(args.get(2).map(String::as_str).unwrap_or("")));
+	}
 	// `takeoff … | head` should end quietly, not panic on a closed pipe.
 	std::panic::set_hook(Box::new(|info| {
 		let msg = info.to_string();
